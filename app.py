@@ -946,7 +946,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r9（比較表の吹き出しと差分バッジを廃止し、元のサマリー表示に復元）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r10（リスクリターン散布図をファンドごとにカラフル表示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2008,25 +2008,37 @@ def render_result_page():
                 st.markdown("##### 📊 リスク・リターン散布図（過去5年間の実績ベース）")
                 st.caption("横軸：過去5年の最低〜最高リターンの値ブレ幅（簡易リスク指標）／縦軸：過去5年の平均リターン")
 
+                # 🎨 ファンドごとに異なる色を割り当てるカラーパレット
+                color_palette = [
+                    "#e64980", "#4c6ef5", "#12b886", "#f59f00", "#7950f2",
+                    "#fa5252", "#15aabf", "#82c91e", "#e8590c", "#1c7ed6",
+                ]
+
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=chart_risk,
-                    y=chart_avg,
-                    mode="markers+text",
-                    text=chart_funds,
-                    textposition="top center",
-                    marker=dict(size=26, color="#0081c9", line=dict(width=2, color="#0f4c75"), opacity=0.85),
-                    customdata=list(zip(chart_min, chart_max)),
-                    hovertemplate="<b>%{text}</b><br>平均リターン: %{y:.1f}%<br>値ブレ幅: %{x:.1f}pt（最低%{customdata[0]:.1f}%〜最高%{customdata[1]:.1f}%）<extra></extra>",
-                ))
+                for idx, f in enumerate(chart_funds):
+                    color = color_palette[idx % len(color_palette)]
+                    fig.add_trace(go.Scatter(
+                        x=[chart_risk[idx]],
+                        y=[chart_avg[idx]],
+                        mode="markers+text",
+                        name=f,
+                        text=[f],
+                        textposition="top center",
+                        textfont=dict(size=13, color=color),
+                        marker=dict(size=32, color=color, line=dict(width=2.5, color="#ffffff"), opacity=0.92),
+                        customdata=[[chart_min[idx], chart_max[idx]]],
+                        hovertemplate="<b>%{text}</b><br>平均リターン: %{y:.1f}%<br>値ブレ幅: %{x:.1f}pt（最低%{customdata[0]:.1f}%〜最高%{customdata[1]:.1f}%）<extra></extra>",
+                    ))
                 fig.update_layout(
                     xaxis_title="リスク（過去5年の値ブレ幅：最高－最低、pt）",
                     yaxis_title="平均リターン（過去5年、%）",
-                    height=420,
+                    height=460,
                     margin=dict(l=10, r=10, t=10, b=10),
                     plot_bgcolor="#f8fafc",
                     paper_bgcolor="#ffffff",
                     font=dict(size=14),
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
                 )
                 fig.update_xaxes(gridcolor="#e5e7eb", zeroline=True, zerolinecolor="#d1d5db")
                 fig.update_yaxes(gridcolor="#e5e7eb", zeroline=True, zerolinecolor="#d1d5db")
