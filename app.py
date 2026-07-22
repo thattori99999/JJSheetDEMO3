@@ -1371,7 +1371,8 @@ def get_cell(df, item_name, fund_name):
         return "記載なし（抽出スキップ）"
 
 
-
+# APIキーのアクティブ状態を画面上で可視化するUIヘルパー
+def display_api_key_status_bar():
     custom_key_raw = st.session_state.get("custom_key", "").strip()
     if custom_key_raw:
         masked = f"****{custom_key_raw[-4:]}" if len(custom_key_raw) > 4 else "****"
