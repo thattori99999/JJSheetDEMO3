@@ -946,7 +946,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r8（差分バッジを決定的計算方式に変更し高低を明示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r9（比較表の吹き出しと差分バッジを廃止し、元のサマリー表示に復元）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -1358,85 +1358,6 @@ def get_cell(df, item_name, fund_name):
         return "記載なし（抽出スキップ）"
 
 
-def build_numeric_axis_badge(axis_label, icon, color, fund_values, unit="%", higher_word="高い", lower_word="低い"):
-    """数値軸（コスト・リターン・リスク等）について、ファンドごとの値を比較し、
-    最も高い/最も低いファンドを明示した『誤解の余地がない』バッジ用データを構築する。
-    fund_values: {ファンド名: float値} の辞書。値が2件未満、または全て同値の場合はNoneを返す（バッジを作らない）。"""
-    vals = {f: v for f, v in fund_values.items() if v is not None}
-    if len(vals) < 2:
-        return None
-    max_val = max(vals.values())
-    min_val = min(vals.values())
-    if max_val == min_val:
-        return None  # 実質的な差がないため、誤解を招くバッジは作らない
-
-    sorted_items = sorted(vals.items(), key=lambda x: x[1], reverse=True)
-    rows = []
-    for fund, val in sorted_items:
-        val_str = f"{val:g}{unit}"
-        if val == max_val:
-            rows.append({"fund": fund, "val": val_str, "mark": "🔺", "word": higher_word, "cls": "diff-high"})
-        elif val == min_val:
-            rows.append({"fund": fund, "val": val_str, "mark": "🔻", "word": lower_word, "cls": "diff-low"})
-        else:
-            rows.append({"fund": fund, "val": val_str, "mark": "▪", "word": "中間", "cls": "diff-mid"})
-
-    return {"axis": axis_label, "icon": icon, "color": color, "rows": rows}
-
-
-def build_categorical_axis_badge(axis_label, icon, color, fund_labels):
-    """NISA対象の有無など、数値ではなく分類（カテゴリ）が異なるかどうかで判定するバッジを構築する。
-    fund_labels: {ファンド名: 表示ラベル文字列}。全ファンドで同一ラベルの場合はNone（差がないため作らない）。"""
-    labels = {f: v for f, v in fund_labels.items() if v and "記載なし" not in v and "抽出スキップ" not in v}
-    if len(labels) < 2:
-        return None
-    unique_labels = set(labels.values())
-    if len(unique_labels) <= 1:
-        return None  # 全ファンドで同じなので差分なし
-
-    rows = [{"fund": f, "val": v, "mark": "🏷", "word": "", "cls": "diff-mid"} for f, v in labels.items()]
-    return {"axis": axis_label, "icon": icon, "color": color, "rows": rows}
-
-
-def compute_deterministic_badges(comparison_df_summary, chart_funds, chart_risk, fund_names):
-    """比較表・グラフですでに算出済みの数値をそのまま用いて、解釈のブレがない差分バッジ一覧を作成する。
-    （AIによる自由記述ではなく、コード側の正確な数値比較のみに基づくため、表示内容と実データの不一致が起こらない）"""
-    badges = []
-
-    # ① コスト（実質コスト目安）
-    cost_vals = {}
-    for f in fund_names:
-        raw = get_cell(comparison_df_summary, "実質コスト（購入手数料＋信託報酬 目安）", f)
-        cost_vals[f] = extract_first_percent(str(raw))
-    b = build_numeric_axis_badge("コスト", "💰", "#b45309", cost_vals, unit="%", higher_word="高い", lower_word="低い")
-    if b:
-        badges.append(b)
-
-    # ② リターン（過去5年平均）
-    return_vals = {}
-    for f in fund_names:
-        raw = get_cell(comparison_df_summary, "過去5年のリターン（平均・実績値）", f)
-        return_vals[f] = parse_numeric_value(str(raw))
-    b = build_numeric_axis_badge("リターン(5年平均)", "📈", "#15803d", return_vals, unit="%", higher_word="高い", lower_word="低い")
-    if b:
-        badges.append(b)
-
-    # ③ リスク（過去5年の値ブレ幅：グラフ用に算出済みの数値を再利用）
-    if chart_funds and chart_risk and len(chart_funds) == len(chart_risk):
-        risk_vals = dict(zip(chart_funds, chart_risk))
-        b = build_numeric_axis_badge("リスク(値ブレ幅)", "⚠️", "#b91c1c", risk_vals, unit="pt", higher_word="大きい", lower_word="小さい")
-        if b:
-            badges.append(b)
-
-    # ④ NISA対象の有無
-    nisa_labels = {f: str(get_cell(comparison_df_summary, "NISA対象の有無", f)) for f in fund_names}
-    b = build_categorical_axis_badge("NISA対応", "🌟", "#7c3aed", nisa_labels)
-    if b:
-        badges.append(b)
-
-    return badges
-
-
 # APIキーのアクティブ状態を画面上で可視化するUIヘルパー
 def display_api_key_status_bar():
     custom_key_raw = st.session_state.get("custom_key", "").strip()
@@ -1465,22 +1386,6 @@ def display_api_key_status_bar():
 
 # 自作の高機能インタラクティブHTML比較テーブルのレンダリング関数
 def render_custom_html_table(comparison_df, parsed_data):
-    analysis_data = parsed_data.get("比較分析", {})
-    
-    # 🌟 万が一「比較分析」オブジェクト内の文脈にファンドA等の仮名が含まれていた場合も、
-    # 描画する直前にフィルター関数を通して確実に正式なファンド名へと差し替えます。
-    selected_funds = st.session_state.selected_funds
-    
-    # 自然な日本語「比較分析」表記への統一、および「目的・機能」と「想定購入層」の完全分割
-    purpose_analysis = replace_dummy_fund_names(analysis_data.get("目的・機能の差", "ファンドの目的や投資対象、運用機能の差異を客観的に比較分析しています。"), selected_funds)
-    target_analysis = replace_dummy_fund_names(analysis_data.get("想定購入層の差", "商品組成会社が想定する購入層やターゲット層、適する投資経験の格差を客観的に比較分析しています。"), selected_funds)
-    cost_analysis = replace_dummy_fund_names(analysis_data.get("コストの差", "手数料や信託報酬などのコスト格差に関する分析結果を表示いたします。"), selected_funds)
-    risk_analysis = replace_dummy_fund_names(analysis_data.get("リスクの差", "ポートフォリオ上の各リスクの違いや共通点について記述しております。"), selected_funds)
-    conflict_analysis = replace_dummy_fund_names(analysis_data.get("利益相反の差", "当事業者とお客さまの利益相反リスクや、関連する取引の影響度合いの違いを客観的に分析しています。"), selected_funds)
-    return_analysis = replace_dummy_fund_names(analysis_data.get("リターンの差", "過去の収益率および5年のブレ幅（推定リスク）に対する総合的な効率性分析です。"), selected_funds)
-    liquidity_analysis = replace_dummy_fund_names(analysis_data.get("換金解約の差", "換金解約の期間や手数料等の違いについての簡潔な分析です。"), selected_funds)
-    nisa_analysis = replace_dummy_fund_names(analysis_data.get("NISAの差", "つみたて投資枠や成長投資枠の対応についての簡潔な分析です。"), selected_funds)
-
     cols = comparison_df.columns.tolist()  # ['比較項目（行）', 'ファンドA', 'ファンドB']
     rows = comparison_df.values.tolist()
 
@@ -1503,26 +1408,7 @@ def render_custom_html_table(comparison_df, parsed_data):
     html += '<tbody>'
     for r_idx, row_data in enumerate(rows):
         item_name = row_data[0]
-        
-        # 行のタイプに応じたホバー分析解説の特定 (「目的・機能」と「想定購入層」を完全に別のホバーとして分離)
-        hover_text = ""
-        if any(x in item_name for x in ["金融商品の目的・機能", "投資目的", "運用目的", "投資対象"]):
-            hover_text = f"📝 <b>目的・機能の比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{purpose_analysis}</span>"
-        elif any(x in item_name for x in ["想定する購入層", "想定購入層", "ターゲット層", "想定顧客層"]):
-            hover_text = f"👥 <b>想定購入層の比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{target_analysis}</span>"
-        elif any(x in item_name for x in ["手数料", "報酬", "コスト"]):
-            hover_text = f"💰 <b>コストの比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{cost_analysis}</span>"
-        elif any(x in item_name for x in ["リスクの内容", "リスク種別"]):
-            hover_text = f"⚠️ <b>リスクの比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{risk_analysis}</span>"
-        elif any(x in item_name for x in ["利益が反する", "利益相反"]):
-            hover_text = f"⚖️ <b>利益相反の比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{conflict_analysis}</span>"
-        elif any(x in item_name for x in ["リターン", "収益率", "基準日"]):
-            hover_text = f"📈 <b>リターンの比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{return_analysis}</span>"
-        elif any(x in item_name for x in ["換金解約"]):
-            hover_text = f"🔄 <b>換金解約の比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{liquidity_analysis}</span>"
-        elif any(x in item_name for x in ["NISA"]):
-            hover_text = f"🌟 <b>NISA対応の比較分析</b><br><span style='font-size: 17px; line-height: 1.5;'>{nisa_analysis}</span>"
-        
+
         # ハイライトセル（最良コスト（min）、最良リターン（max））の判定用
         best_indices = []
         if "対象期間・基準日" not in item_name:
@@ -1532,14 +1418,10 @@ def render_custom_html_table(comparison_df, parsed_data):
                 best_indices = extract_min_max_indices(row_data, mode="min")
                 
         # 各行の出力
-        html += f'<tr class="tooltip-row" style="border-bottom: 1px solid #d1d5db;">'
+        html += f'<tr style="border-bottom: 1px solid #d1d5db;">'
         for c_idx, val in enumerate(row_data):
             if c_idx == 0:
-                html += f'<td style="padding: 15px; border: 1px solid #d1d5db; font-weight: bold; color: #0f4c75; position: relative; word-wrap: break-word;">'
-                html += f'{val}'
-                if hover_text:
-                    html += f'<div class="tooltip-content">{hover_text}</div>'
-                html += f'</td>'
+                html += f'<td style="padding: 15px; border: 1px solid #d1d5db; font-weight: bold; color: #0f4c75; word-wrap: break-word;">{val}</td>'
             else:
                 # ユーザー要求に基づき、優良数値セルに対して専用スタイル用CSSクラス「custom-highlight-cell」を付加
                 if c_idx in best_indices:
@@ -1875,7 +1757,7 @@ def render_selection_content(active_api_key):
 
 # STEP 3 : 比較結果表示および自動解説
 # AI解説レポート（JSON構造）を「サマリーカード＋重要度別カードUI＋折りたたみ詳細」で描画する関数
-def render_analysis_report(parsed_analysis, selected_funds, deterministic_badges=None):
+def render_analysis_report(parsed_analysis, selected_funds):
     # 万が一、辞書型以外（パース失敗時のフォールバック含む）が渡された場合の防御的処理
     if not isinstance(parsed_analysis, dict):
         parsed_analysis = {}
@@ -1887,28 +1769,13 @@ def render_analysis_report(parsed_analysis, selected_funds, deterministic_badges
     key_points = parsed_analysis.get("key_points") or []
     conclusion_text = parsed_analysis.get("conclusion") or "まとめを生成できませんでした。時間をおいて再度お試しください。"
 
-    # --- ① 差分バッジ（常時表示・各ファンドの実際の値と高低が一目で分かるカード表示） ---
-    # ※AIの自由記述ではなく、比較表・グラフと全く同じ数値をそのまま用いて算出しているため、
-    #   表示内容と実データが常に一致し、「どちらが高いか低いか分からない」という誤解が起こらない。
-    st.markdown("<div class='badge-section-title'>🏷️ ひと目でわかる差分バッジ（🔺最も高い／低い　🔻最も低い／少ない）</div>", unsafe_allow_html=True)
-    badges = deterministic_badges or []
-    if badges:
-        badge_html = '<div class="badge-chip-row">'
-        for b in badges:
-            rows_html = ""
-            for r in b["rows"]:
-                fund_disp = replace_dummy_fund_names(r["fund"], selected_funds)
-                word_disp = f"（{r['word']}）" if r["word"] else ""
-                rows_html += f'<div class="diff-card-row {r["cls"]}">{r["mark"]} {fund_disp}：<b>{r["val"]}</b>{word_disp}</div>'
-            badge_html += (
-                f'<div class="diff-card" style="border-color:{b["color"]};">'
-                f'<div class="diff-card-title" style="color:{b["color"]};">{b["icon"]} {b["axis"]}</div>'
-                f'{rows_html}</div>'
-            )
-        badge_html += '</div>'
-        st.markdown(badge_html, unsafe_allow_html=True)
-    else:
-        st.caption("（今回の比較では、コスト・リターン・リスク・NISA対応のいずれにも際立った差分は検出されませんでした）")
+    # --- ① 結論サマリーカード（常時表示・担当者が一目で把握できる要約） ---
+    st.markdown(f"""
+    <div class="summary-card">
+        <div class="summary-label">📌 結論サマリー（まずはここだけ読めばOK）</div>
+        <div class="summary-text">{summary_text}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     importance_style = {
         "high":   {"card": "importance-high",   "badge": "badge-high",   "label": "🔴 重要"},
@@ -1916,15 +1783,8 @@ def render_analysis_report(parsed_analysis, selected_funds, deterministic_badges
         "low":    {"card": "importance-low",    "badge": "badge-low",    "label": "⚪ 参考"},
     }
 
-    # --- ② 結論サマリーの全文・個別の着眼点・まとめは折りたたみ表示（デフォルトは閉じた状態） ---
-    with st.expander("📖 もっと詳しく読む（結論サマリー全文・個別の着眼点・まとめ）", expanded=False):
-        st.markdown(f"""
-        <div class="summary-card">
-            <div class="summary-label">📌 結論サマリー</div>
-            <div class="summary-text">{summary_text}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+    # --- ② 詳細（選定の着眼点・まとめ）は折りたたみ表示（デフォルトは閉じた状態） ---
+    with st.expander("📋 詳細な選定の着眼点・まとめを見る（クリックで展開）", expanded=False):
         if not key_points:
             st.info("着眼点データを取得できませんでした。時間をおいて再度お試しください。")
         else:
@@ -2007,7 +1867,7 @@ def render_result_page():
     chart_funds, chart_risk = [], []
 
     if show_comparison_table:
-        st.markdown("#### 🔲 ロボがまとめた横並び比較表 (項目にカーソルを当てると高度なAIロボ分析レポートが表示されます)")
+        st.markdown("#### 🔲 ロボがまとめた横並び比較表")
         with st.spinner("AIロボが重要情報シートを精緻に解析し、最適な比較表を作成しております。少々お待ちください..."):
             row_items = [
                 "運用会社", "金融商品の目的・機能", "投資対象（キーワード）",
@@ -2278,12 +2138,7 @@ def render_result_page():
 
     else:
         # すでに生成・保持されているレポートが存在する場合は即時描画
-        deterministic_badges = []
-        if comparison_df_summary is not None:
-            deterministic_badges = compute_deterministic_badges(
-                comparison_df_summary, chart_funds, chart_risk, st.session_state.selected_funds
-            )
-        render_analysis_report(st.session_state.generated_explanation, st.session_state.selected_funds, deterministic_badges)
+        render_analysis_report(st.session_state.generated_explanation, st.session_state.selected_funds)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -2540,51 +2395,6 @@ def main_app():
         box-shadow: inset 0 2px 4px rgba(0,0,0,0.02) !important;
     }
 
-    /* --- 🏷️ 差分バッジ（軸ごとの比較カード）表示 --- */
-    .badge-section-title {
-        font-size: 20px !important;
-        font-weight: 800 !important;
-        color: #0f4c75;
-        margin-bottom: 10px;
-    }
-    .badge-chip-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 14px;
-        margin-bottom: 22px;
-        align-items: stretch;
-    }
-    .diff-card {
-        background-color: #ffffff;
-        border: 2px solid;
-        border-radius: 14px;
-        padding: 12px 18px;
-        min-width: 220px;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
-    }
-    .diff-card-title {
-        font-size: 17px !important;
-        font-weight: 800;
-        margin-bottom: 8px;
-    }
-    .diff-card-row {
-        font-size: 16px !important;
-        line-height: 1.6;
-        padding: 2px 0;
-        color: #333333;
-    }
-    .diff-card-row.diff-high {
-        color: #b91c1c;
-        font-weight: 700;
-    }
-    .diff-card-row.diff-low {
-        color: #1d4ed8;
-        font-weight: 700;
-    }
-    .diff-card-row.diff-mid {
-        color: #64748b;
-    }
-
     /* --- 🌟 結論サマリーカード（一目で把握できる要約） --- */
     .summary-card {
         background-color: #eef6fc !important;
@@ -2708,62 +2518,6 @@ def main_app():
         font-weight: 800 !important;
         text-decoration: underline;
         text-underline-offset: 3px;
-    }
-
-    /* --- 🌟 インタラクティブなポップアップ（吹き出し）用CSSスタイル --- */
-    .tooltip-row {
-        position: relative;
-        transition: background-color 0.15s ease;
-    }
-    .tooltip-row:hover {
-        background-color: #f1f5f9 !important;
-    }
-    .tooltip-content {
-        visibility: hidden;
-        width: 380px; 
-        background-color: #0081c9 !important; /* 洗練されたアクティブブルーに変更 */
-        color: #ffffff !important;
-        text-align: left;
-        border-radius: 28px; /* 角丸を丸みの豊かな形状（28px）に拡張 */
-        padding: 18px 26px; /* 内部の余白を最適化 */
-        position: absolute;
-        z-index: 999999 !important;
-        left: 20px; /* セルの右側に出現 */
-        top: 25px;
-        opacity: 0;
-        transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
-        transform: translateY(5px);
-        font-size: 17px !important; /* 極大フォント（17px）を維持 */
-        font-weight: normal !important;
-        line-height: 1.5 !important;
-        box-shadow: 0 10px 15px -3px rgba(0,0,0,0.25), 0 4px 6px -2px rgba(0,0,0,0.1);
-        border: 1px solid #00669e !important;
-        pointer-events: none; /* ポップアップをすり抜けて下の操作を可能に */
-    }
-    /* 吹き出しの三角（枠線用） */
-    .tooltip-content::before {
-        content: "";
-        position: absolute;
-        top: 18px;
-        left: -14px;
-        border-width: 7px;
-        border-style: solid;
-        border-color: transparent #00669e transparent transparent;
-    }
-    /* 吹き出しの三角（背景色用） */
-    .tooltip-content::after {
-        content: "";
-        position: absolute;
-        top: 19px;
-        left: -12px;
-        border-width: 6px;
-        border-style: solid;
-        border-color: transparent #0081c9 transparent transparent;
-    }
-    .tooltip-row:hover .tooltip-content {
-        visibility: visible;
-        opacity: 1;
-        transform: translateY(0);
     }
     </style>""", unsafe_allow_html=True)
 
