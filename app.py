@@ -824,13 +824,6 @@ JSON内の全ての文章に登場するファンド名は、絶対に「ファ�
 
 【JSONの出力形式】
 {
-  "highlight_badges": [
-    {
-      "axis": "（差異の種類。「投資対象」「コスト」「リスク」「リターン」「NISA」「利益相反」のいずれか1つ）",
-      "fund": "（その軸において特に際立っている実際の正式ファンド名。1つのみ）",
-      "note": "（差異の内容を表す8〜14文字程度の短い一言。例：「年0.44%高い」「値ブレ幅が大きい」「対象外」など。数値がある場合はできるだけ含めること）"
-    }
-  ],
   "summary": "（今回の比較全体について、担当者・お客様が読んだだけで『結局どこがどう違うのか』『特に何に注目すべきか』を具体的に把握できる結論サマリー。5〜7文・250〜400文字程度を目安に、以下を必ず含めること。①比較対象ファンドの投資対象・性質の違い（一言で）②コスト・リターン・リスクのうち、実際に明確な差が存在する項目について、必ず実際のファンド名を用いて『どちらのファンドが、その項目において、どちら方向に高い（低い）のか』を明記すること（可能な限り実際の数値・料率も交えて具体的に）。『それぞれ明確な差があり』『料率に差があります』のように、差があるという結果だけを述べて、どちらがどう違うのかの具体的な内容を書かない表現は【絶対禁止】です。③今回のケースで最も注目・確認すべき着眼点は何か。抽象的な一般論、『それぞれに特徴があります』『重要な着眼点となります』のような具体性のない締め方や逃げ表現は禁止。断定的な推奨表現も禁止。文中で特に重要な差異点・キーワード（ファンド名や数値を含む）は【強調表示ルール】に従い<strong>タグで囲むこと。【改行ルール】言及する比較の観点（例：投資対象の性質→コストの差→リスクの差→リターンの差、のように話題が切り替わるタイミング）ごとに、必ず改行コード\\nを1つ入れて段落を分け、1つの段落内で複数の異なる観点を続けて詰め込まないこと。）",
   "key_points": [
     {
@@ -841,12 +834,6 @@ JSON内の全ての文章に登場するファンド名は、絶対に「ファ�
   ],
   "conclusion": "（客観的な事実に基づき、今後の判断指標となる総括。特定ファンドへの誘導や断定的な推奨表現は一切禁止。丁寧語で詳細かつロジカルに記述。文中で特に重要な差異点・キーワードは【強調表示ルール】に従い<strong>タグで囲むこと。）"
 }
-
-【highlight_badges作成ルール（超重要）】
-・highlight_badgesは、比較表を見ただけでは一目で分かりにくい「軸ごとの際立った差」を、担当者・お客様が数秒で把握できるようにするための短いバッジ（チップ）表示用データです。
-・実際に明確な差が存在する軸のみを対象とし、最大5個程度に絞ってください（差がない、または軽微な軸は含めないこと）。
-・断定的な優劣表現（「おすすめ」「favorable」等）は厳禁です。あくまで「どちらが・どの方向に」という客観的な事実のみを短く記載してください。
-・noteは必ず8〜14文字程度に収め、可能な限り具体的な数値（%等）を含めてください。長い説明文にはしないでください。
 
 【強調表示ルール（超重要）】
 summary・comment・conclusionの各文章内において、読み手が一瞬で目に留めるべき「ファンド間で異なっている核心的な数値・キーワード・フレーズ」（例：手数料率が高い方のファンド名と割合の大小関係、リスク特性の決定的な違いを表す語句、利益相反の有無など）を、必ずHTMLの<strong>タグ（例：<strong>購入時手数料が高く設定されています</strong>）で囲んで強調してください。
@@ -938,7 +925,7 @@ if "show_comparison_table" not in st.session_state:
 # バージョンが変わると、管理画面で未カスタマイズ（前バージョンのデフォルトのまま）のセッションは
 # 自動的に最新のデフォルトプロンプトへ同期される。
 PROMPT_TABLE_VERSION = "v2"  # コンパクト比較表用のキーワード項目（投資対象・想定顧客層・リスク種別）を追加
-PROMPT_ANALYSIS_VERSION = "v4"  # 差分バッジ(highlight_badges)機能を追加
+PROMPT_ANALYSIS_VERSION = "v5"  # AI生成のhighlight_badgesを廃止し、コード側で正確に計算する決定的バッジ方式へ変更
 
 if "system_prompt_table" not in st.session_state:
     st.session_state.system_prompt_table = DEFAULT_PROMPT_TABLE
@@ -959,7 +946,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r7（コンパクト比較表・差分バッジ・リスクリターン散布図を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r8（差分バッジを決定的計算方式に変更し高低を明示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -1369,6 +1356,85 @@ def get_cell(df, item_name, fund_name):
         return row.iloc[0][fund_name]
     except Exception:
         return "記載なし（抽出スキップ）"
+
+
+def build_numeric_axis_badge(axis_label, icon, color, fund_values, unit="%", higher_word="高い", lower_word="低い"):
+    """数値軸（コスト・リターン・リスク等）について、ファンドごとの値を比較し、
+    最も高い/最も低いファンドを明示した『誤解の余地がない』バッジ用データを構築する。
+    fund_values: {ファンド名: float値} の辞書。値が2件未満、または全て同値の場合はNoneを返す（バッジを作らない）。"""
+    vals = {f: v for f, v in fund_values.items() if v is not None}
+    if len(vals) < 2:
+        return None
+    max_val = max(vals.values())
+    min_val = min(vals.values())
+    if max_val == min_val:
+        return None  # 実質的な差がないため、誤解を招くバッジは作らない
+
+    sorted_items = sorted(vals.items(), key=lambda x: x[1], reverse=True)
+    rows = []
+    for fund, val in sorted_items:
+        val_str = f"{val:g}{unit}"
+        if val == max_val:
+            rows.append({"fund": fund, "val": val_str, "mark": "🔺", "word": higher_word, "cls": "diff-high"})
+        elif val == min_val:
+            rows.append({"fund": fund, "val": val_str, "mark": "🔻", "word": lower_word, "cls": "diff-low"})
+        else:
+            rows.append({"fund": fund, "val": val_str, "mark": "▪", "word": "中間", "cls": "diff-mid"})
+
+    return {"axis": axis_label, "icon": icon, "color": color, "rows": rows}
+
+
+def build_categorical_axis_badge(axis_label, icon, color, fund_labels):
+    """NISA対象の有無など、数値ではなく分類（カテゴリ）が異なるかどうかで判定するバッジを構築する。
+    fund_labels: {ファンド名: 表示ラベル文字列}。全ファンドで同一ラベルの場合はNone（差がないため作らない）。"""
+    labels = {f: v for f, v in fund_labels.items() if v and "記載なし" not in v and "抽出スキップ" not in v}
+    if len(labels) < 2:
+        return None
+    unique_labels = set(labels.values())
+    if len(unique_labels) <= 1:
+        return None  # 全ファンドで同じなので差分なし
+
+    rows = [{"fund": f, "val": v, "mark": "🏷", "word": "", "cls": "diff-mid"} for f, v in labels.items()]
+    return {"axis": axis_label, "icon": icon, "color": color, "rows": rows}
+
+
+def compute_deterministic_badges(comparison_df_summary, chart_funds, chart_risk, fund_names):
+    """比較表・グラフですでに算出済みの数値をそのまま用いて、解釈のブレがない差分バッジ一覧を作成する。
+    （AIによる自由記述ではなく、コード側の正確な数値比較のみに基づくため、表示内容と実データの不一致が起こらない）"""
+    badges = []
+
+    # ① コスト（実質コスト目安）
+    cost_vals = {}
+    for f in fund_names:
+        raw = get_cell(comparison_df_summary, "実質コスト（購入手数料＋信託報酬 目安）", f)
+        cost_vals[f] = extract_first_percent(str(raw))
+    b = build_numeric_axis_badge("コスト", "💰", "#b45309", cost_vals, unit="%", higher_word="高い", lower_word="低い")
+    if b:
+        badges.append(b)
+
+    # ② リターン（過去5年平均）
+    return_vals = {}
+    for f in fund_names:
+        raw = get_cell(comparison_df_summary, "過去5年のリターン（平均・実績値）", f)
+        return_vals[f] = parse_numeric_value(str(raw))
+    b = build_numeric_axis_badge("リターン(5年平均)", "📈", "#15803d", return_vals, unit="%", higher_word="高い", lower_word="低い")
+    if b:
+        badges.append(b)
+
+    # ③ リスク（過去5年の値ブレ幅：グラフ用に算出済みの数値を再利用）
+    if chart_funds and chart_risk and len(chart_funds) == len(chart_risk):
+        risk_vals = dict(zip(chart_funds, chart_risk))
+        b = build_numeric_axis_badge("リスク(値ブレ幅)", "⚠️", "#b91c1c", risk_vals, unit="pt", higher_word="大きい", lower_word="小さい")
+        if b:
+            badges.append(b)
+
+    # ④ NISA対象の有無
+    nisa_labels = {f: str(get_cell(comparison_df_summary, "NISA対象の有無", f)) for f in fund_names}
+    b = build_categorical_axis_badge("NISA対応", "🌟", "#7c3aed", nisa_labels)
+    if b:
+        badges.append(b)
+
+    return badges
 
 
 # APIキーのアクティブ状態を画面上で可視化するUIヘルパー
@@ -1809,7 +1875,7 @@ def render_selection_content(active_api_key):
 
 # STEP 3 : 比較結果表示および自動解説
 # AI解説レポート（JSON構造）を「サマリーカード＋重要度別カードUI＋折りたたみ詳細」で描画する関数
-def render_analysis_report(parsed_analysis, selected_funds):
+def render_analysis_report(parsed_analysis, selected_funds, deterministic_badges=None):
     # 万が一、辞書型以外（パース失敗時のフォールバック含む）が渡された場合の防御的処理
     if not isinstance(parsed_analysis, dict):
         parsed_analysis = {}
@@ -1817,37 +1883,32 @@ def render_analysis_report(parsed_analysis, selected_funds):
     # 仮名混入防止フィルターをJSON構造全体に再帰適用
     parsed_analysis = clean_dummy_names_in_data(parsed_analysis, selected_funds)
 
-    highlight_badges = parsed_analysis.get("highlight_badges") or []
     summary_text = parsed_analysis.get("summary") or "サマリーを生成できませんでした。時間をおいて再度お試しください。"
     key_points = parsed_analysis.get("key_points") or []
     conclusion_text = parsed_analysis.get("conclusion") or "まとめを生成できませんでした。時間をおいて再度お試しください。"
 
-    # --- ① 差分バッジ（常時表示・数秒で要点を把握できる短いチップ表示） ---
-    axis_style = {
-        "投資対象": {"icon": "🎯", "color": "#0f4c75"},
-        "コスト":   {"icon": "💰", "color": "#b45309"},
-        "リスク":   {"icon": "⚠️", "color": "#b91c1c"},
-        "リターン": {"icon": "📈", "color": "#15803d"},
-        "NISA":    {"icon": "🌟", "color": "#7c3aed"},
-        "利益相反": {"icon": "⚖️", "color": "#0369a1"},
-    }
-    st.markdown("<div class='badge-section-title'>🏷️ ひと目でわかる差分バッジ</div>", unsafe_allow_html=True)
-    valid_badges = [b for b in highlight_badges if isinstance(b, dict) and b.get("axis") and b.get("fund") and b.get("note")]
-    if valid_badges:
+    # --- ① 差分バッジ（常時表示・各ファンドの実際の値と高低が一目で分かるカード表示） ---
+    # ※AIの自由記述ではなく、比較表・グラフと全く同じ数値をそのまま用いて算出しているため、
+    #   表示内容と実データが常に一致し、「どちらが高いか低いか分からない」という誤解が起こらない。
+    st.markdown("<div class='badge-section-title'>🏷️ ひと目でわかる差分バッジ（🔺最も高い／低い　🔻最も低い／少ない）</div>", unsafe_allow_html=True)
+    badges = deterministic_badges or []
+    if badges:
         badge_html = '<div class="badge-chip-row">'
-        for b in valid_badges:
-            axis = str(b.get("axis", "")).strip()
-            fund = replace_dummy_fund_names(str(b.get("fund", "")), selected_funds)
-            note = str(b.get("note", "")).strip()
-            style = axis_style.get(axis, {"icon": "🔹", "color": "#334155"})
+        for b in badges:
+            rows_html = ""
+            for r in b["rows"]:
+                fund_disp = replace_dummy_fund_names(r["fund"], selected_funds)
+                word_disp = f"（{r['word']}）" if r["word"] else ""
+                rows_html += f'<div class="diff-card-row {r["cls"]}">{r["mark"]} {fund_disp}：<b>{r["val"]}</b>{word_disp}</div>'
             badge_html += (
-                f'<span class="badge-chip" style="border-color:{style["color"]}; color:{style["color"]};">'
-                f'{style["icon"]} <b>{axis}</b>：{fund}が{note}</span>'
+                f'<div class="diff-card" style="border-color:{b["color"]};">'
+                f'<div class="diff-card-title" style="color:{b["color"]};">{b["icon"]} {b["axis"]}</div>'
+                f'{rows_html}</div>'
             )
         badge_html += '</div>'
         st.markdown(badge_html, unsafe_allow_html=True)
     else:
-        st.caption("（今回の比較では、特に際立った差分は検出されませんでした）")
+        st.caption("（今回の比較では、コスト・リターン・リスク・NISA対応のいずれにも際立った差分は検出されませんでした）")
 
     importance_style = {
         "high":   {"card": "importance-high",   "badge": "badge-high",   "label": "🔴 重要"},
@@ -1942,6 +2003,8 @@ def render_result_page():
     show_comparison_table = st.session_state.get("show_comparison_table", True)
 
     mismatch_warnings = []
+    comparison_df_summary = None
+    chart_funds, chart_risk = [], []
 
     if show_comparison_table:
         st.markdown("#### 🔲 ロボがまとめた横並び比較表 (項目にカーソルを当てると高度なAIロボ分析レポートが表示されます)")
@@ -2215,7 +2278,12 @@ def render_result_page():
 
     else:
         # すでに生成・保持されているレポートが存在する場合は即時描画
-        render_analysis_report(st.session_state.generated_explanation, st.session_state.selected_funds)
+        deterministic_badges = []
+        if comparison_df_summary is not None:
+            deterministic_badges = compute_deterministic_badges(
+                comparison_df_summary, chart_funds, chart_risk, st.session_state.selected_funds
+            )
+        render_analysis_report(st.session_state.generated_explanation, st.session_state.selected_funds, deterministic_badges)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -2472,7 +2540,7 @@ def main_app():
         box-shadow: inset 0 2px 4px rgba(0,0,0,0.02) !important;
     }
 
-    /* --- 🏷️ 差分バッジ（チップ）表示 --- */
+    /* --- 🏷️ 差分バッジ（軸ごとの比較カード）表示 --- */
     .badge-section-title {
         font-size: 20px !important;
         font-weight: 800 !important;
@@ -2482,19 +2550,39 @@ def main_app():
     .badge-chip-row {
         display: flex;
         flex-wrap: wrap;
-        gap: 10px;
+        gap: 14px;
         margin-bottom: 22px;
+        align-items: stretch;
     }
-    .badge-chip {
-        display: inline-block;
+    .diff-card {
         background-color: #ffffff;
         border: 2px solid;
-        border-radius: 999px;
-        padding: 9px 18px;
+        border-radius: 14px;
+        padding: 12px 18px;
+        min-width: 220px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+    }
+    .diff-card-title {
         font-size: 17px !important;
-        font-weight: 600;
-        line-height: 1.4;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        font-weight: 800;
+        margin-bottom: 8px;
+    }
+    .diff-card-row {
+        font-size: 16px !important;
+        line-height: 1.6;
+        padding: 2px 0;
+        color: #333333;
+    }
+    .diff-card-row.diff-high {
+        color: #b91c1c;
+        font-weight: 700;
+    }
+    .diff-card-row.diff-low {
+        color: #1d4ed8;
+        font-weight: 700;
+    }
+    .diff-card-row.diff-mid {
+        color: #64748b;
     }
 
     /* --- 🌟 結論サマリーカード（一目で把握できる要約） --- */
