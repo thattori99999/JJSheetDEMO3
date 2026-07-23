@@ -946,7 +946,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r11（散布図の軸フォント拡大・平均線・余白調整で視認性改善）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r12（散布図の平均線を削除し、ファンド名ラベルを拡大）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2016,22 +2016,11 @@ def render_result_page():
 
                 # 軸の見切れ防止のため、データ範囲に余白（パディング）を持たせる
                 x_pad = max((max(chart_risk) - min(chart_risk)) * 0.18, 1.5)
-                y_pad = max((max(chart_avg) - min(chart_avg)) * 0.22, 1.5)
+                y_pad = max((max(chart_avg) - min(chart_avg)) * 0.28, 2.0)
                 x_range = [max(0, min(chart_risk) - x_pad), max(chart_risk) + x_pad]
                 y_range = [min(chart_avg) - y_pad, max(chart_avg) + y_pad]
-                avg_risk = sum(chart_risk) / len(chart_risk)
-                avg_return = sum(chart_avg) / len(chart_avg)
 
                 fig = go.Figure()
-
-                # 全体平均を示す点線（あくまで参考の目安線であり、優劣の判定線ではない旨をラベルで明示）
-                if len(chart_funds) > 1:
-                    fig.add_hline(y=avg_return, line_width=1.5, line_dash="dash", line_color="#94a3b8",
-                                  annotation_text="全ファンド平均リターン", annotation_font_size=13,
-                                  annotation_font_color="#64748b", annotation_position="top left")
-                    fig.add_vline(x=avg_risk, line_width=1.5, line_dash="dash", line_color="#94a3b8",
-                                  annotation_text="全ファンド平均リスク", annotation_font_size=13,
-                                  annotation_font_color="#64748b", annotation_position="top right")
 
                 for idx, f in enumerate(chart_funds):
                     color = color_palette[idx % len(color_palette)]
@@ -2042,7 +2031,7 @@ def render_result_page():
                         name=f,
                         text=[f],
                         textposition="top center",
-                        textfont=dict(size=15, color=color, family="Arial Black"),
+                        textfont=dict(size=20, color=color, family="Arial Black"),
                         marker=dict(size=34, color=color, line=dict(width=2.5, color="#ffffff"), opacity=0.92),
                         customdata=[[chart_min[idx], chart_max[idx]]],
                         hovertemplate="<b>%{text}</b><br>平均リターン: %{y:.1f}%<br>値ブレ幅: %{x:.1f}pt（最低%{customdata[0]:.1f}%〜最高%{customdata[1]:.1f}%）<extra></extra>",
