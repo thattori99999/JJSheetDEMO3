@@ -946,7 +946,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r12（散布図の平均線を削除し、ファンド名ラベルを拡大）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r13（散布図の全フォントを比較表と同程度に拡大）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2031,7 +2031,7 @@ def render_result_page():
                         name=f,
                         text=[f],
                         textposition="top center",
-                        textfont=dict(size=20, color=color, family="Arial Black"),
+                        textfont=dict(size=22, color=color, family="Arial Black"),
                         marker=dict(size=34, color=color, line=dict(width=2.5, color="#ffffff"), opacity=0.92),
                         customdata=[[chart_min[idx], chart_max[idx]]],
                         hovertemplate="<b>%{text}</b><br>平均リターン: %{y:.1f}%<br>値ブレ幅: %{x:.1f}pt（最低%{customdata[0]:.1f}%〜最高%{customdata[1]:.1f}%）<extra></extra>",
@@ -2039,23 +2039,23 @@ def render_result_page():
                 fig.update_layout(
                     xaxis_title="<b>リスク（過去5年の値ブレ幅：最高－最低、pt）</b>",
                     yaxis_title="<b>平均リターン（過去5年、%）</b>",
-                    height=500,
+                    height=520,
                     margin=dict(l=10, r=10, t=40, b=10),
                     plot_bgcolor="#f8fafc",
                     paper_bgcolor="#ffffff",
-                    font=dict(size=15),
+                    font=dict(size=19),
                     showlegend=True,
-                    legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="center", x=0.5, font=dict(size=15)),
-                    hoverlabel=dict(font_size=15),
+                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5, font=dict(size=19)),
+                    hoverlabel=dict(font_size=19),
                 )
                 fig.update_xaxes(
                     gridcolor="#e5e7eb", zeroline=True, zerolinecolor="#cbd5e1", zerolinewidth=1.5,
-                    range=x_range, tickfont=dict(size=16), title_font=dict(size=17),
+                    range=x_range, tickfont=dict(size=20), title_font=dict(size=22),
                     ticksuffix="pt",
                 )
                 fig.update_yaxes(
                     gridcolor="#e5e7eb", zeroline=True, zerolinecolor="#cbd5e1", zerolinewidth=1.5,
-                    range=y_range, tickfont=dict(size=16), title_font=dict(size=17),
+                    range=y_range, tickfont=dict(size=20), title_font=dict(size=22),
                     ticksuffix="%",
                 )
                 st.plotly_chart(fig, use_container_width=True)
