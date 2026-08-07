@@ -1695,7 +1695,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r19（絞り込み結果の合致理由に顧客属性の入力値を明記）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r20（自由記述を肯定/否定ニュアンス判定つきの解析に強化）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2149,6 +2149,49 @@ def extract_keywords_from_free_text(text, min_len=2):
     return result
 
 
+# --- 🧭 自由記述の意味合い（肯定的な関心か、除外したい否定的なニュアンスか）を判定するルール ---
+# ※AIによる自由な意味解釈は行わず、あらかじめ定義した「手がかり語（cue words）」が
+#   同じ節（クローズ）内に存在するかどうかのみで判定する、決定的（deterministic）なロジック。
+NEGATION_CUES = [
+    "避けたい", "苦手", "嫌い", "不要", "除きたい", "除外したい", "したくない",
+    "興味がない", "望まない", "求めない", "多すぎる", "は嫌", "NG", "ダメ",
+    "控えたい", "抵抗がある", "心配", "不安", "怖い", "リスクが高すぎる", "リスクを取りたくない",
+]
+POSITIVE_CUES = [
+    "興味がある", "したい", "重視", "希望", "好き", "気になる", "検討したい",
+    "求める", "優先", "興味を持って", "積極的に", "前向き", "魅力を感じ",
+]
+
+
+def analyze_free_text_sentiment(free_text):
+    """自由記述を句点(。)単位の『節』に分割し、各節に含まれるキーワードについて、
+    同じ節内にある手がかり語(NEGATION_CUES / POSITIVE_CUES)の有無から、
+    そのキーワードが『肯定的な関心事』なのか『除外したい否定的な事柄』なのかを判定する。
+    否定・肯定どちらの手がかり語も見つからない場合は、単に言及されているだけとみなし『肯定的』寄りに扱う
+    （自由記述に書く内容は、基本的に前向きな関心事や重視したい点であることが多いため）。
+    戻り値：[{"keyword": str, "sentiment": "positive"|"negative", "clause": str}, ...]"""
+    if not free_text or not free_text.strip():
+        return []
+
+    clauses = [c.strip() for c in re.split(r"[。\n]", free_text) if c.strip()]
+    results = []
+    seen = set()
+    for clause in clauses:
+        keywords = extract_keywords_from_free_text(clause)
+        if not keywords:
+            continue
+        has_negation = any(cue in clause for cue in NEGATION_CUES)
+        has_positive = any(cue in clause for cue in POSITIVE_CUES)
+        # 否定手がかりのみが存在する場合だけ「否定的」と判定し、それ以外（肯定手がかりのみ／両方／どちらもなし）は「肯定的」寄りに扱う
+        sentiment = "negative" if (has_negation and not has_positive) else "positive"
+        for kw in keywords:
+            if kw in seen:
+                continue
+            seen.add(kw)
+            results.append({"keyword": kw, "sentiment": sentiment, "clause": clause})
+    return results
+
+
 # --- 🗂️ ファンド分類（投資対象の分類）の判定（AIを使わない、キーワードベースの決定的分類） ---
 FUND_CATEGORY_RULES = [
     ("全世界株式型", ["全世界", "オール・カントリー", "オルカン"]),
@@ -2179,7 +2222,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
     """全ファンドの原文テキストと、ヒアリングで得た顧客属性を照合し、
     ルールベースのスコアリングにより候補を上位N件に絞り込む。
     戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
-    free_text_keywords = extract_keywords_from_free_text(hearing.get("free_text", ""))
+    free_text_items = analyze_free_text_sentiment(hearing.get("free_text", ""))
 
     results = []
     for name in fund_list:
@@ -2250,12 +2293,19 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
                 score -= 5
                 reasons.append(f"【除外条件】お客様が除外を希望された「{tag}」に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
 
-        # ⑧ 自由記述欄のキーワード照合（担当者が特に重要と考え記入した情報のため、優先度を高めに設定）
-        matched_keywords = [kw for kw in free_text_keywords if kw in text]
-        if matched_keywords:
-            score += 4 * len(matched_keywords)
-            free_text_display = hearing.get("free_text", "").strip()
-            reasons.append(f"【自由記述】お客様についてのメモ「{free_text_display}」に含まれるキーワード「{'、'.join(matched_keywords)}」に関連する記載がファンドの説明にあるため合致")
+        # ⑧ 自由記述欄のキーワード照合（肯定的な関心事か、除外したい否定的な事柄かを手がかり語から判定）
+        positive_matches = [item for item in free_text_items if item["sentiment"] == "positive" and item["keyword"] in text]
+        negative_matches = [item for item in free_text_items if item["sentiment"] == "negative" and item["keyword"] in text]
+
+        if positive_matches:
+            score += 4 * len(positive_matches)
+            for item in positive_matches:
+                reasons.append(f"【自由記述】お客様のメモ「{item['clause']}」というご関心（キーワード：{item['keyword']}）に関連する記載がファンドの説明にあるため合致")
+
+        if negative_matches:
+            score -= 6 * len(negative_matches)
+            for item in negative_matches:
+                reasons.append(f"【自由記述】お客様のメモ「{item['clause']}」という除外のご意向（キーワード：{item['keyword']}）に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
 
         results.append({"fund": name, "score": round(score, 1), "reasons": reasons})
 
