@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r26（ヒアリング項目に「コストに関する考え方」を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r27（絞り込み前に選定方針・優先順位の解説を表示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2612,7 +2612,68 @@ def classify_core_satellite(text, fund_name=""):
     return "コア資産"
 
 
-def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
+# --- 📋 絞り込み前に提示する「選定方針」の説明（投資目的別のファンド傾向ガイダンス） ---
+# ※ここもAIの自由生成には頼らず、あらかじめ整理した方針をそのまま提示する（絞り込みロジックと解説内容の整合性を担保するため）。
+PURPOSE_FUND_GUIDANCE = {
+    "長期的な資産形成（つみたて運用等による将来への着実な備え）":
+        "長期での複利効果を活かせる、低コストなインデックス型の『コア資産』（全世界株式・先進国株式・国内株式等）が中心の候補が適しています。NISAつみたて投資枠との相性や、長期保有に適した低い信託報酬（コスト）も重視されます。",
+    "直近のライフイベント資金（住宅、教育等に向けた計画的な確保）":
+        "資金を使う時期が決まっているため、値動きの大きい資産（新興国株式・テーマ型等の『サテライト資産』）は避け、比較的値動きの小さい債券型やバランス型など、元本の安定性を重視した候補が適しています。",
+    "老後資金の確保・資産寿命の延伸（引き出しに耐えうる安定運用）":
+        "資産を取り崩しながら運用する前提のため、極端な値動きを避けたバランス型・分配型の商品や、『コア資産』を中心とした安定運用が適しています。",
+    "定期的な利回り（インカムゲイン）の最大化・分配重視":
+        "毎月決算型・分配重視型の商品や、REIT等インカム収益を意識した商品が適しています。ただし、分配金の支払いは基準価額の下落要因になる点にも留意が必要です。",
+    "インフレ・市場下落リスクに対するポートフォリオ資産防衛":
+        "物価連動国債やオルタナティブ資産、REIT等の実物資産など、インフレ局面や株式市場下落時に異なる値動きをする資産を組み合わせる候補が適しています。",
+}
+
+
+def build_selection_policy(hearing):
+    """絞り込みボタンを押す前に提示する『選定方針』を、ヒアリング内容から組み立てる。
+    ①投資目的に応じてどのような傾向のファンドが適しているかの解説と、
+    ②実際のスコアリングで何を優先しているか（重み付けの大きい順）の一覧を返す。
+    戻り値：{"purpose_guidance": str, "priority_list": [str, ...]}"""
+    purpose = hearing.get("purpose", "")
+    tolerance_raw = hearing.get("tolerance_raw", "普通")
+    core_satellite_pref = hearing.get("core_satellite_pref", "特にこだわらない")
+    cost_pref = hearing.get("cost_pref", "特にこだわらない")
+    nisa_pref = hearing.get("nisa_pref", "特にこだわらない")
+    fx_pref = hearing.get("fx_tolerance", "特にこだわらない")
+    avoid_tags = hearing.get("avoid_tags", [])
+    free_text = hearing.get("free_text", "").strip()
+
+    purpose_guidance = PURPOSE_FUND_GUIDANCE.get(purpose, "")
+
+    # 優先順位は、score_and_narrow_funds() 内の実際の加減点の大きさに対応させている
+    # （除外意向 > コスト > リスク許容度 > コア・サテライト > 投資目的 > NISA > 為替 > 自由記述の肯定的関心事）。
+    priority_list = []
+    free_text_items = analyze_free_text_sentiment(free_text)
+    has_negative_free_text = any(item["sentiment"] == "negative" for item in free_text_items)
+    if avoid_tags or has_negative_free_text:
+        detail = []
+        if avoid_tags:
+            detail.append("、".join(avoid_tags))
+        if has_negative_free_text:
+            detail.append("自由記述で示された除外意向")
+        priority_list.append(f"お客様が除外を希望された条件（{'／'.join(detail)}）")
+    if cost_pref != "特にこだわらない":
+        priority_list.append(f"コストに関する考え方：「{cost_pref}」")
+    priority_list.append(f"リスク許容度：「{tolerance_raw}」")
+    if core_satellite_pref != "特にこだわらない":
+        priority_list.append(f"コア・サテライト運用の考え方：「{core_satellite_pref}」")
+    if purpose:
+        priority_list.append(f"投資目的：「{purpose}」")
+    if nisa_pref != "特にこだわらない":
+        priority_list.append(f"NISA活用の意向：「{nisa_pref}」")
+    if fx_pref != "特にこだわらない":
+        priority_list.append(f"為替リスクの許容度：「{fx_pref}」")
+    if any(item["sentiment"] == "positive" for item in free_text_items):
+        priority_list.append("自由記述で示された肯定的な関心事")
+
+    return {"purpose_guidance": purpose_guidance, "priority_list": priority_list}
+
+
+
     """全ファンドの原文テキストと、ヒアリングで得た顧客属性を照合し、
     ルールベースのスコアリングにより候補を上位N件に絞り込む。
     戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
@@ -3224,23 +3285,47 @@ def render_selection_content(active_api_key):
         </div>
         """, unsafe_allow_html=True)
 
+        # ヒアリング内容を先にまとめておく（選定方針の表示にも、実際の絞り込み処理にも同じ内容を使用する）
+        hearing = {
+            "tolerance_level": (
+                "低い" if ("低い" in tolerance or "非常に低い" in tolerance) else
+                "高い" if ("高い" in tolerance) else "普通"
+            ),
+            "tolerance_raw": tolerance,
+            "purpose": purpose,
+            "nisa_pref": nisa_pref,
+            "fx_tolerance": fx_tolerance,
+            "core_satellite_pref": core_satellite_pref,
+            "cost_pref": cost_pref,
+            "avoid_tags": avoid_tags,
+            "free_text": free_text,
+        }
+
+        # --- 📋 絞り込みを行う前に、まず「このお客様属性ではどのようなファンドが適しているか」の方針を提示する ---
+        policy = build_selection_policy(hearing)
+        st.markdown("<div class='form-title' style='font-size:20px;'>📋 選定方針（このお客様属性ではどのようなファンドが適しているか）</div>", unsafe_allow_html=True)
+        if policy["purpose_guidance"]:
+            st.markdown(f"""
+            <div style="background-color: #fffaf0; border-left: 5px solid #f59f00; padding: 14px 18px; border-radius: 8px; margin-bottom: 12px;">
+                <span style="font-size: 16px; font-weight: bold; color: #92400e;">🎯 投資目的「{purpose}」に対する考え方</span><br>
+                <span style="font-size: 16px; color: #1a1a1a; line-height: 1.7;">{policy["purpose_guidance"]}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("投資目的が選択されていないため、投資目的に基づくファンド傾向の解説は表示されません。上部の「お客様の属性設定」で投資目的をご選択ください。")
+
+        if policy["priority_list"]:
+            priority_html = "".join([f"<li style='margin-bottom:4px;'>{p}</li>" for p in policy["priority_list"]])
+            st.markdown(f"""
+            <div style="background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 8px; padding: 14px 18px; margin-bottom: 15px;">
+                <span style="font-size: 16px; font-weight: bold; color: #0f4c75;">📊 今回の絞り込みで優先している観点（影響度の大きい順）</span>
+                <ol style="margin: 8px 0 0 0; padding-left: 20px; font-size: 15px; color: #333;">{priority_html}</ol>
+            </div>
+            """, unsafe_allow_html=True)
+
         top_n = st.selectbox("候補として絞り込むファンド数の目安：", options=[3, 5, 8], index=1, key="narrowing_top_n")
 
         if st.button("🔍 候補ファンドを絞り込む"):
-            hearing = {
-                "tolerance_level": (
-                    "低い" if ("低い" in tolerance or "非常に低い" in tolerance) else
-                    "高い" if ("高い" in tolerance) else "普通"
-                ),
-                "tolerance_raw": tolerance,
-                "purpose": purpose,
-                "nisa_pref": nisa_pref,
-                "fx_tolerance": fx_tolerance,
-                "core_satellite_pref": core_satellite_pref,
-                "cost_pref": cost_pref,
-                "avoid_tags": avoid_tags,
-                "free_text": free_text,
-            }
             narrowed = score_and_narrow_funds(fund_list, st.session_state.uploaded_funds, hearing, top_n=top_n)
             st.session_state.narrowing_results = narrowed
             st.session_state.selected_funds = [r["fund"] for r in narrowed]
