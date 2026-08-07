@@ -946,7 +946,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r15（ヒアリング項目に保有金融資産を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r16（プレースホルダー日本語化・インカムゲイン対応・自由記述優先度アップ・ファンド分類表示/並替）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -1363,11 +1363,71 @@ def get_cell(df, item_name, fund_name):
 #   キーワード・数値の有無のみで判定することで、再現性・検証可能性を担保している。
 RISKY_KEYWORDS = ["新興国", "レバレッジ", "カントリーリスク", "インド", "テクノロジー", "脱炭素", "ハイイールド", "信用リスクが高", "元本超過"]
 
+# 自由記述欄からキーワードを拾う際に除外する一般的な語（助詞・付属語・定型表現など）
+FREE_TEXT_STOPWORDS = {
+    "こと", "ため", "もの", "よう", "これ", "それ", "あの", "この", "です", "ます",
+    "して", "いる", "ある", "なる", "たい", "など", "という", "ください", "予定",
+    "希望", "場合", "くらい", "ぐらい", "ので", "から", "また", "そして", "しかし",
+    "資金", "運用", "投資", "商品", "対象", "検討", "考え", "少なめ", "多め", "当面"
+}
+
+
+def extract_keywords_from_free_text(text, min_len=2):
+    """自由記述欄から、判定に使えそうな単語（キーワード）を簡易的に抽出する。
+    ※形態素解析は行わず、句読点＋代表的な助詞での分割による簡易処理のため、
+    完全な精度は保証されないが、ESGや教育資金・住宅ローンといった特徴的な語は概ね拾える。"""
+    if not text:
+        return []
+    rough_tokens = re.split(r"[、。・/\s,.()（）\n【】「」]+", text)
+    keywords = []
+    for rt in rough_tokens:
+        sub_tokens = re.split(r"(?:について|に関心|に関する|のため|によって|とともに|は|が|を|に|の|で|と|へ|から|まで|より|も|や)", rt)
+        for st in sub_tokens:
+            st = st.strip()
+            if len(st) >= min_len and st not in FREE_TEXT_STOPWORDS:
+                keywords.append(st)
+    # 重複除去（出現順は維持）
+    seen = set()
+    result = []
+    for k in keywords:
+        if k not in seen:
+            seen.add(k)
+            result.append(k)
+    return result
+
+
+# --- 🗂️ ファンド分類（投資対象の分類）の判定（AIを使わない、キーワードベースの決定的分類） ---
+FUND_CATEGORY_RULES = [
+    ("全世界株式型", ["全世界", "オール・カントリー", "オルカン"]),
+    ("米国株式型", ["米国株式", "S&P500", "S&P 500", "米国の企業"]),
+    ("先進国株式型", ["先進国の株式", "先進国株式"]),
+    ("インド株式型", ["インド"]),
+    ("新興国株式型", ["新興国"]),
+    ("国内株式型", ["日本株式", "TOPIX", "東証株価指数", "日経平均", "225"]),
+    ("テーマ型株式（脱炭素・環境）", ["脱炭素", "カーボン"]),
+    ("テーマ型株式（テクノロジー）", ["テクノロジー", "ロボティクス"]),
+    ("バランス型（複合資産）", ["REIT", "不動産投資信託証券"]),
+    ("債券型", ["ソブリン", "ボンド", "債券"]),
+]
+
+
+def classify_fund_type(text):
+    """ファンドの原文テキストから、投資対象の分類（ファンド分類）を判定する。
+    複数のルールに合致する場合は、上に定義した順序（より具体的な分類を優先）で最初に一致したものを採用する。"""
+    if not text:
+        return "その他・分類不明"
+    for category, keywords in FUND_CATEGORY_RULES:
+        if any(k in text for k in keywords):
+            return category
+    return "その他・分類不明"
+
 
 def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
     """全ファンドの原文テキストと、ヒアリングで得た顧客属性を照合し、
     ルールベースのスコアリングにより候補を上位N件に絞り込む。
     戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
+    free_text_keywords = extract_keywords_from_free_text(hearing.get("free_text", ""))
+
     results = []
     for name in fund_list:
         data = uploaded_funds.get(name, {})
@@ -1423,11 +1483,24 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
             else:
                 score -= 2
 
-        # ⑥ 除外したい条件（こだわり条件）との照合
+        # ⑥ 投資目的との照合（インカムゲイン重視の場合、毎月決算型・分配重視型を優先）
+        purpose = hearing.get("purpose", "")
+        if "インカムゲイン" in purpose or "分配" in purpose:
+            if any(k in text for k in ["毎月決算", "毎月分配", "分配重視"]):
+                score += 3
+                reasons.append("毎月決算型・分配重視型であり、インカムゲイン（定期的な利回り）重視のニーズに合致")
+
+        # ⑦ 除外したい条件（こだわり条件）との照合
         for tag in hearing.get("avoid_tags", []):
             if tag and tag in text:
                 score -= 5
                 reasons.append(f"除外条件「{tag}」に該当するため大幅減点")
+
+        # ⑧ 自由記述欄のキーワード照合（担当者が特に重要と考え記入した情報のため、優先度を高めに設定）
+        matched_keywords = [kw for kw in free_text_keywords if kw in text]
+        if matched_keywords:
+            score += 4 * len(matched_keywords)
+            reasons.append(f"自由記述の内容と関連するキーワードに合致：{'、'.join(matched_keywords)}")
 
         results.append({"fund": name, "score": round(score, 1), "reasons": reasons})
 
@@ -1780,6 +1853,7 @@ def render_selection_content(active_api_key):
                 "iDeCo", "不動産（投資用）", "特になし・分からない"
             ],
             default=[],
+            placeholder="選択してください（複数選択可）",
             key="result_existing_assets"
         )
         asset_scale = st.selectbox(
@@ -1792,14 +1866,16 @@ def render_selection_content(active_api_key):
             "除外したい条件（該当するものがあれば選択）：",
             options=["新興国", "レバレッジ", "ハイイールド", "テクノロジー", "脱炭素"],
             default=[],
+            placeholder="選択してください（複数選択可）",
             key="result_avoid_tags"
         )
         free_text = st.text_area(
-            "その他、お客様についての自由記述（任意）：",
+            "⭐ その他、お客様についての自由記述（任意・できるだけご記入をお願いします）：",
             placeholder="例：住宅ローン返済中で当面の余裕資金は少なめ／数年以内に教育資金の取り崩し予定あり／ESG投資に関心がある　など、上記の項目でカバーしきれない情報があれば自由にご記入ください。",
             key="result_free_text",
-            height=90
+            height=110
         )
+        st.caption("💡 この自由記述欄の内容は、解説文の内容だけでなく、絞り込みモードでの候補選定の優先度にも反映されます。定型項目だけでは伝わらないニュアンスがあれば、ぜひご記入ください。")
 
     st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
 
@@ -1821,31 +1897,50 @@ def render_selection_content(active_api_key):
 
     if not is_narrowing_mode:
         # === 従来通り：手動選択モード ===
-        st.markdown("<p style='font-size: 18px; margin: 15px 0 10px 0;'>比較を行いたいファンドの左側にある「選択」列にチェックを入れてください。<br><span style='color: #0f4c75; font-weight: bold;'>※ あらかじめ最新の重要情報シートPDFデータが自動的にロードされています。手動アップロードなしでもそのまま比較頂けます。</span></p>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size: 18px; margin: 15px 0 10px 0;'>比較を行いたいファンドの左側にある「選択」列にチェックを入れてください（ファンド分類ごとに並べて表示しています）。<br><span style='color: #0f4c75; font-weight: bold;'>※ あらかじめ最新の重要情報シートPDFデータが自動的にロードされています。手動アップロードなしでもそのまま比較頂けます。</span></p>", unsafe_allow_html=True)
 
         st.markdown("""
         <div style="background-color: #0f4c75; padding: 10px 15px; border-radius: 12px 12px 0 0; color: white; display: flex; font-weight: bold; font-size: 22px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-            <div style="flex: 1.5; text-align: center; border-right: 1px solid rgba(255,255,255,0.2);">選択</div>
-            <div style="flex: 3.5; padding-left: 20px; border-right: 1px solid rgba(255,255,255,0.2);">運用会社</div>
-            <div style="flex: 5; padding-left: 20px;">ファンド名</div>
+            <div style="flex: 1.2; text-align: center; border-right: 1px solid rgba(255,255,255,0.2);">選択</div>
+            <div style="flex: 2.8; padding-left: 20px; border-right: 1px solid rgba(255,255,255,0.2);">ファンド分類</div>
+            <div style="flex: 2.8; padding-left: 20px; border-right: 1px solid rgba(255,255,255,0.2);">運用会社</div>
+            <div style="flex: 4.2; padding-left: 20px;">ファンド名</div>
         </div>
         """, unsafe_allow_html=True)
 
-        for idx, fund_name in enumerate(fund_list):
+        # ファンド分類を判定し、分類ごとにグループ化して並び替える
+        fund_categories = {}
+        for fund_name in fund_list:
+            fund_data = st.session_state.uploaded_funds[fund_name]
+            fund_text = fund_data.get("text", "") if isinstance(fund_data, dict) else str(fund_data)
+            fund_categories[fund_name] = classify_fund_type(fund_text)
+
+        sorted_fund_list = sorted(fund_list, key=lambda name: (fund_categories[name], name))
+
+        prev_category = None
+        for idx, fund_name in enumerate(sorted_fund_list):
             fund_data = st.session_state.uploaded_funds[fund_name]
             if isinstance(fund_data, dict):
                 company = fund_data.get("company", "特定できませんでした")
             else:
                 company = "特定できませんでした（再登録をお願いいたします）"
+            category = fund_categories[fund_name]
+
+            # 分類が切り替わるタイミングで区切り線を挿入し、グループを視覚的に分かりやすくする
+            if category != prev_category:
+                st.markdown(f"<div style='margin-top:10px; margin-bottom:2px; font-weight:bold; color:#0f4c75; font-size:16px; border-bottom:2px solid #cfe3f0;'>🗂️ {category}</div>", unsafe_allow_html=True)
+                prev_category = category
 
             bg_class = "fund-row-light" if idx % 2 == 0 else "fund-row-dark"
-            col_sel, col_com, col_fn = st.columns([1.5, 3.5, 5])
+            col_sel, col_cat, col_com, col_fn = st.columns([1.2, 2.8, 2.8, 4.2])
 
             with col_sel:
                 default_value = fund_name in st.session_state.selected_funds
                 is_checked = st.checkbox("", value=default_value, key=f"chk_{fund_name}", label_visibility="collapsed")
                 if is_checked:
                     current_choices.append(fund_name)
+            with col_cat:
+                st.markdown(f"<div class='fund-text-company'>{category}</div>", unsafe_allow_html=True)
             with col_com:
                 st.markdown(f"<div class='fund-text-company'>{company}</div>", unsafe_allow_html=True)
             with col_fn:
@@ -1871,9 +1966,11 @@ def render_selection_content(active_api_key):
                     "低い" if ("低い" in tolerance or "非常に低い" in tolerance) else
                     "高い" if ("高い" in tolerance) else "普通"
                 ),
+                "purpose": purpose,
                 "nisa_pref": nisa_pref,
                 "fx_tolerance": fx_tolerance,
                 "avoid_tags": avoid_tags,
+                "free_text": free_text,
             }
             narrowed = score_and_narrow_funds(fund_list, st.session_state.uploaded_funds, hearing, top_n=top_n)
             st.session_state.narrowing_results = narrowed
@@ -1896,11 +1993,13 @@ def render_selection_content(active_api_key):
                     if is_checked:
                         current_choices.append(fund_name)
                 with col_info:
+                    fund_text_for_cat = fund_data.get("text", "") if isinstance(fund_data, dict) else str(fund_data)
+                    category = classify_fund_type(fund_text_for_cat)
                     reasons_html = "".join([f"<li style='margin-bottom:2px;'>{r_txt}</li>" for r_txt in reason_map.get(fund_name, [])]) or "<li>（際立った合致理由はありませんが、他候補との相対評価で選定されました）</li>"
                     st.markdown(f"""
                     <div style="padding: 6px 0;">
                         <span style="font-weight: bold; color: #0f4c75; font-size: 18px;">{fund_name}</span>
-                        <span style="color: #666; font-size: 15px;">（{company}）</span>
+                        <span style="color: #666; font-size: 15px;">（{company}／🗂️ {category}）</span>
                         <ul style="margin: 4px 0 0 0; padding-left: 20px; font-size: 15px; color: #444;">{reasons_html}</ul>
                     </div>
                     """, unsafe_allow_html=True)
