@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r24（為替リスク判定の表現漏れ修正・同点時のコスト優先タイブレーク追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r25（REIT専門ファンドを「不動産投資型」として分類）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2557,11 +2557,17 @@ FUND_CATEGORY_RULES = [
 ]
 
 
-def classify_fund_type(text):
+def classify_fund_type(text, fund_name=""):
     """ファンドの原文テキストから、投資対象の分類（ファンド分類）を判定する。
-    複数のルールに合致する場合は、上に定義した順序（より具体的な分類を優先）で最初に一致したものを採用する。"""
+    複数のルールに合致する場合は、上に定義した順序（より具体的な分類を優先）で最初に一致したものを採用する。
+    ※REIT関連は、ファンド名自体に「REIT」「リート」を含む“REIT専門ファンド”を『不動産投資型』として
+    明確に区別する（オーストラリアREITファンド、インデックスファンドJリート等）。
+    ファンド名にREIT/リートを含まず、本文中でREITが複数資産の一部として言及されているだけの
+    バランス型ファンド（のむラップ・ファンド等）は、従来通り『バランス型（複合資産）』のままとする。"""
     if not text:
         return "その他・分類不明"
+    if fund_name and any(k in fund_name for k in ["REIT", "リート"]):
+        return "不動産投資型（REIT）"
     for category, keywords in FUND_CATEGORY_RULES:
         if any(k in text for k in keywords):
             return category
@@ -2580,7 +2586,8 @@ def classify_fund_type(text):
 SATELLITE_CATEGORIES = {
     "新興国株式型", "インド株式型",
     "テーマ型株式（脱炭素・環境）", "テーマ型株式（テクノロジー）",
-    "バランス型（複合資産）",  # REITを含む複合資産型。ご指定の定義（REIT＝サテライト資産）に基づく
+    "不動産投資型（REIT）",       # REIT専門ファンド。ご指定の定義（REIT＝サテライト資産）に基づく
+    "バランス型（複合資産）",     # 複数資産の一部としてREIT等を含む複合資産型。同じくサテライト資産として扱う
 }
 # classify_fund_type のカテゴリ体系に含まれない、追加のサテライト要素（原文キーワードで直接判定）
 SATELLITE_EXTRA_KEYWORDS = [
@@ -2591,13 +2598,13 @@ SATELLITE_EXTRA_KEYWORDS = [
 ]
 
 
-def classify_core_satellite(text):
+def classify_core_satellite(text, fund_name=""):
     """コア・サテライト運用の考え方に基づき、ファンドを『コア資産』『サテライト資産』のいずれかに分類する。
     定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。
     上記に該当しないものはすべて『コア資産』として扱う。"""
     if not text:
         return "コア資産"
-    category = classify_fund_type(text)
+    category = classify_fund_type(text, fund_name=fund_name)
     if category in SATELLITE_CATEGORIES:
         return "サテライト資産"
     if any(k in text for k in SATELLITE_EXTRA_KEYWORDS):
@@ -2682,7 +2689,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
         # ⑥.5 コア・サテライト運用の考え方との照合
         # 定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。それ以外はコア資産。
         core_sat_pref = hearing.get("core_satellite_pref", "特にこだわらない")
-        fund_core_sat = classify_core_satellite(text)
+        fund_core_sat = classify_core_satellite(text, fund_name=name)
         if core_sat_pref.startswith("コア資産（"):
             if fund_core_sat == "コア資産":
                 score += 3
@@ -3142,7 +3149,7 @@ def render_selection_content(active_api_key):
         for fund_name in fund_list:
             fund_data = st.session_state.uploaded_funds[fund_name]
             fund_text = fund_data.get("text", "") if isinstance(fund_data, dict) else str(fund_data)
-            fund_categories[fund_name] = classify_fund_type(fund_text)
+            fund_categories[fund_name] = classify_fund_type(fund_text, fund_name=fund_name)
 
         sorted_fund_list = sorted(fund_list, key=lambda name: (fund_categories[name], name))
 
@@ -3226,8 +3233,8 @@ def render_selection_content(active_api_key):
                         current_choices.append(fund_name)
                 with col_info:
                     fund_text_for_cat = fund_data.get("text", "") if isinstance(fund_data, dict) else str(fund_data)
-                    category = classify_fund_type(fund_text_for_cat)
-                    core_sat = classify_core_satellite(fund_text_for_cat)
+                    category = classify_fund_type(fund_text_for_cat, fund_name=fund_name)
+                    core_sat = classify_core_satellite(fund_text_for_cat, fund_name=fund_name)
                     styled_reasons = [re.sub(r"^(【[^】]+】)", r"<b style='color:#0f4c75;'>\1</b>", r_txt) for r_txt in reason_map.get(fund_name, [])]
                     reasons_html = "".join([f"<li style='margin-bottom:5px;'>{r_txt}</li>" for r_txt in styled_reasons]) or "<li>（際立った合致理由はありませんが、他候補との相対評価で選定されました）</li>"
                     st.markdown(f"""
