@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r23（新規8ファンド追加、テーマ型分類キーワード拡充・優先順位修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r24（為替リスク判定の表現漏れ修正・同点時のコスト優先タイブレーク追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2658,14 +2658,19 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
             reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品であるため合致")
 
         # ⑤ 為替リスク許容度との照合
+        # ※以前は「為替変動リスク」「外国」「為替ヘッジなし」という完全一致のみで判定していたため、
+        #   「為替相場の変動」のような言い回しの違いを拾えず、実際には為替リスクがある商品を
+        #   誤って「国内資産中心」と判定してしまう不具合があった。「為替」という語の有無で判定することで、
+        #   表現の違いによらず為替エクスポージャーの記載を確実に検出する。
         fx_pref = hearing.get("fx_tolerance", "")
-        has_fx_exposure = any(k in text for k in ["為替変動リスク", "外国", "為替ヘッジなし"])
+        has_fx_exposure = "為替" in text
         if fx_pref == "為替リスクは避けたい（国内資産中心）":
             if not has_fx_exposure:
                 score += 2
-                reasons.append(f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替変動リスクの記載がない国内資産中心の商品であるため合致")
+                reasons.append(f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替に関する記載がない国内資産中心の商品であるため合致")
             else:
                 score -= 2
+                reasons.append(f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替変動リスクの記載がある商品のため減点（このファンドは為替の影響を受ける可能性がある点にご注意ください）")
 
         # ⑥ 投資目的との照合（インカムゲイン重視の場合、毎月決算型・分配重視型を優先）
         purpose = hearing.get("purpose", "")
@@ -2712,9 +2717,12 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
             for item in negative_matches:
                 reasons.append(f"【自由記述】お客様のメモ「{item['clause']}」という除外のご意向（キーワード：{item['keyword']}）に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
 
-        results.append({"fund": name, "score": round(score, 1), "reasons": reasons})
+        results.append({"fund": name, "score": round(score, 1), "reasons": reasons, "trust_pct": trust_pct})
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    # スコアが同点の場合、コード内での定義順という無意味な基準で結果が決まってしまわないよう、
+    # 「信託報酬（コスト）が低い方を優先する」という明確なタイブレークルールを設ける。
+    # 信託報酬が抽出できなかったファンドは、比較上最も不利な扱い（コスト不明として後順位）とする。
+    results.sort(key=lambda x: (-x["score"], x["trust_pct"] if x["trust_pct"] is not None else float("inf")))
     return results[:top_n]
 
 
@@ -3204,6 +3212,7 @@ def render_selection_content(active_api_key):
         if narrowing_results:
             reason_map = {r["fund"]: r["reasons"] for r in narrowing_results}
             st.markdown("##### ✅ 絞り込み結果（チェックを調整して最終確定できます）")
+            st.caption("※スコアが同点の場合は、信託報酬（コスト）がより低いファンドを優先して表示しています。")
             for idx, r in enumerate(narrowing_results):
                 fund_name = r["fund"]
                 fund_data = st.session_state.uploaded_funds.get(fund_name, {})
