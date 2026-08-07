@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r25（REIT専門ファンドを「不動産投資型」として分類）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r26（ヒアリング項目に「コストに関する考え方」を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2647,13 +2647,32 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
                 score += 1
                 reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、過度に値動きの大きい資産（新興国・レバレッジ型等）を含まない標準的なリスク水準のため合致")
 
-        # ③ コスト（低コストをやや優遇。ただし決定的な足切りにはしない）
+        # ③ コストに関する考え方との照合
+        # お客様の「コストに関する考え方」の回答に応じて、信託報酬の高低に対する重み付けを変える。
+        cost_pref = hearing.get("cost_pref", "特にこだわらない")
         if trust_pct is not None:
-            if trust_pct < 0.5:
-                score += 1.5
-                reasons.append(f"【コスト】信託報酬が年率{trust_pct:g}%と低水準であるため、コストを抑えたいニーズに合致")
-            elif trust_pct > 1.5 and tol == "低い":
-                score -= 1
+            if cost_pref == "コストを最優先に抑えたい（低コスト重視）":
+                if trust_pct < 0.5:
+                    score += 4
+                    reasons.append(f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と低水準であるため合致")
+                elif trust_pct > 1.0:
+                    score -= 3
+                    reasons.append(f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と比較的高水準であるため減点")
+            elif cost_pref == "コストと運用内容のバランスを重視したい":
+                if trust_pct < 0.5:
+                    score += 2
+                    reasons.append(f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と低水準であるため合致")
+                elif trust_pct > 1.5:
+                    score -= 1
+            elif cost_pref == "コストよりも運用内容・リターンを重視したい":
+                # コストの高低による加減点は行わない（運用内容・リターンを優先するご意向のため）
+                pass
+            else:  # 特にこだわらない（既定の軽い低コスト優遇のみ）
+                if trust_pct < 0.5:
+                    score += 1.5
+                    reasons.append(f"【コスト】信託報酬が年率{trust_pct:g}%と低水準であるため、コストを抑えたいニーズに合致")
+                elif trust_pct > 1.5 and tol == "低い":
+                    score -= 1
 
         # ④ NISA活用意向との照合
         nisa_pref = hearing.get("nisa_pref", "")
@@ -3098,6 +3117,17 @@ def render_selection_content(active_api_key):
             index=3,
             key="result_core_satellite_pref"
         )
+        cost_pref = st.selectbox(
+            "コストに関する考え方：",
+            options=[
+                "コストを最優先に抑えたい（低コスト重視）",
+                "コストと運用内容のバランスを重視したい",
+                "コストよりも運用内容・リターンを重視したい",
+                "特にこだわらない",
+            ],
+            index=3,
+            key="result_cost_pref"
+        )
         avoid_tags = st.multiselect(
             "除外したい条件（該当するものがあれば選択）：",
             options=["新興国", "レバレッジ", "ハイイールド", "テクノロジー", "脱炭素"],
@@ -3207,6 +3237,7 @@ def render_selection_content(active_api_key):
                 "nisa_pref": nisa_pref,
                 "fx_tolerance": fx_tolerance,
                 "core_satellite_pref": core_satellite_pref,
+                "cost_pref": cost_pref,
                 "avoid_tags": avoid_tags,
                 "free_text": free_text,
             }
@@ -3641,6 +3672,7 @@ def render_result_page():
         selected_fx = st.session_state.get("result_fx_tolerance", "特にこだわらない")
         selected_nisa_pref = st.session_state.get("result_nisa_pref", "特にこだわらない")
         selected_core_satellite_pref = st.session_state.get("result_core_satellite_pref", "特にこだわらない")
+        selected_cost_pref = st.session_state.get("result_cost_pref", "特にこだわらない")
         selected_avoid_tags = st.session_state.get("result_avoid_tags", [])
         selected_existing_assets = st.session_state.get("result_existing_assets", [])
         selected_asset_scale = st.session_state.get("result_asset_scale", "回答しない")
@@ -3673,6 +3705,8 @@ def render_result_page():
                 extra_profile_lines.append(f"・NISA活用の意向：{selected_nisa_pref}")
             if selected_core_satellite_pref != "特にこだわらない":
                 extra_profile_lines.append(f"・コア・サテライト運用の考え方：{selected_core_satellite_pref}")
+            if selected_cost_pref != "特にこだわらない":
+                extra_profile_lines.append(f"・コストに関する考え方：{selected_cost_pref}")
             if selected_existing_assets:
                 extra_profile_lines.append(f"・現在保有している金融資産：{'、'.join(selected_existing_assets)}")
             if selected_asset_scale != "回答しない":
@@ -3696,7 +3730,7 @@ def render_result_page():
 ・特にお客様の年齢層（若年層であれば長期投資の複利メリット、シニア層であれば流動性の確保や取り崩しフェーズへの適応など）に考慮し、投資期間を想定した最適なアプローチをアドバイスに含めてください。
 ・お客様の「投資目的」と照らし合わせ、今回の各ファンドが資産形成の目標達成にどう機能するのか（あるいはどのような点で注意が必要か）を丁寧に整理してください。
 ・お客様の「リスク許容度」と照らし合わせて、5年の実績最低・最高値から想定されるボラティリティ（ブレ幅）が、このお客様の許容範囲内に収まるアセットバランスなのかを論理的かつ誠実に分析・解説してください。
-・上記の追加項目（運用期間・為替許容度・NISA意向・コア・サテライト運用の考え方・除外条件・自由記述）が設定されている場合は、それらの内容も踏まえて整合性のとれた解説をしてください。ただし、記載のない前提を勝手に補って断定しないでください。
+・上記の追加項目（運用期間・為替許容度・NISA意向・コア・サテライト運用の考え方・コストに関する考え方・除外条件・自由記述）が設定されている場合は、それらの内容も踏まえて整合性のとれた解説をしてください。ただし、記載のない前提を勝手に補って断定しないでください。
 ・「魅力的」などの売り込み・押し売り表現は徹底的に排除し、お客様が主体的に賢い判断を下せるよう、中立的かつ客観的なファクトベース of 道標となる説明に徹してください。
 
 【コア・サテライト運用の考え方（分類定義）】
