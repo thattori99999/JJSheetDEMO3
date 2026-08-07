@@ -1695,7 +1695,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r18（新規17ファンドを追加、重複3ファンドは除外）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r19（絞り込み結果の合致理由に顧客属性の入力値を明記）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2198,22 +2198,23 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
         if tol == "低い":
             if risk_hits == 0:
                 score += 3
-                reasons.append("値動きの大きい資産（新興国・レバレッジ等）を含まず、低いリスク許容度に合致")
+                reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、新興国・レバレッジ型などの値動きの大きい資産を含まないため合致")
             else:
                 score -= 3 * risk_hits
         elif tol == "高い":
             if risk_hits >= 1:
                 score += 2
-                reasons.append("積極的な運用を求めるニーズに沿った、値動きの大きい資産を含む")
+                reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、積極的な運用を志向する値動きの大きい資産を含むため合致")
         else:  # 普通
             if risk_hits <= 1:
                 score += 1
+                reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、過度に値動きの大きい資産（新興国・レバレッジ型等）を含まない標準的なリスク水準のため合致")
 
         # ③ コスト（低コストをやや優遇。ただし決定的な足切りにはしない）
         if trust_pct is not None:
             if trust_pct < 0.5:
                 score += 1.5
-                reasons.append(f"信託報酬が年率{trust_pct:g}%と低水準")
+                reasons.append(f"【コスト】信託報酬が年率{trust_pct:g}%と低水準であるため、コストを抑えたいニーズに合致")
             elif trust_pct > 1.5 and tol == "低い":
                 score -= 1
 
@@ -2221,10 +2222,10 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
         nisa_pref = hearing.get("nisa_pref", "")
         if nisa_pref == "つみたて投資枠を使いたい" and "つみたて投資枠" in text:
             score += 2
-            reasons.append("NISAつみたて投資枠の対象商品")
+            reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品であるため合致")
         elif nisa_pref == "成長投資枠を使いたい" and "成長投資枠" in text:
             score += 2
-            reasons.append("NISA成長投資枠の対象商品")
+            reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品であるため合致")
 
         # ⑤ 為替リスク許容度との照合
         fx_pref = hearing.get("fx_tolerance", "")
@@ -2232,7 +2233,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
         if fx_pref == "為替リスクは避けたい（国内資産中心）":
             if not has_fx_exposure:
                 score += 2
-                reasons.append("為替変動リスクの記載がなく、国内資産中心のニーズに合致")
+                reasons.append(f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替変動リスクの記載がない国内資産中心の商品であるため合致")
             else:
                 score -= 2
 
@@ -2241,19 +2242,20 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
         if "インカムゲイン" in purpose or "分配" in purpose:
             if any(k in text for k in ["毎月決算", "毎月分配", "分配重視"]):
                 score += 3
-                reasons.append("毎月決算型・分配重視型であり、インカムゲイン（定期的な利回り）重視のニーズに合致")
+                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、毎月決算型・分配重視型の商品であるため合致")
 
         # ⑦ 除外したい条件（こだわり条件）との照合
         for tag in hearing.get("avoid_tags", []):
             if tag and tag in text:
                 score -= 5
-                reasons.append(f"除外条件「{tag}」に該当するため大幅減点")
+                reasons.append(f"【除外条件】お客様が除外を希望された「{tag}」に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
 
         # ⑧ 自由記述欄のキーワード照合（担当者が特に重要と考え記入した情報のため、優先度を高めに設定）
         matched_keywords = [kw for kw in free_text_keywords if kw in text]
         if matched_keywords:
             score += 4 * len(matched_keywords)
-            reasons.append(f"自由記述の内容と関連するキーワードに合致：{'、'.join(matched_keywords)}")
+            free_text_display = hearing.get("free_text", "").strip()
+            reasons.append(f"【自由記述】お客様についてのメモ「{free_text_display}」に含まれるキーワード「{'、'.join(matched_keywords)}」に関連する記載がファンドの説明にあるため合致")
 
         results.append({"fund": name, "score": round(score, 1), "reasons": reasons})
 
@@ -2719,6 +2721,7 @@ def render_selection_content(active_api_key):
                     "低い" if ("低い" in tolerance or "非常に低い" in tolerance) else
                     "高い" if ("高い" in tolerance) else "普通"
                 ),
+                "tolerance_raw": tolerance,
                 "purpose": purpose,
                 "nisa_pref": nisa_pref,
                 "fx_tolerance": fx_tolerance,
@@ -2748,12 +2751,13 @@ def render_selection_content(active_api_key):
                 with col_info:
                     fund_text_for_cat = fund_data.get("text", "") if isinstance(fund_data, dict) else str(fund_data)
                     category = classify_fund_type(fund_text_for_cat)
-                    reasons_html = "".join([f"<li style='margin-bottom:2px;'>{r_txt}</li>" for r_txt in reason_map.get(fund_name, [])]) or "<li>（際立った合致理由はありませんが、他候補との相対評価で選定されました）</li>"
+                    styled_reasons = [re.sub(r"^(【[^】]+】)", r"<b style='color:#0f4c75;'>\1</b>", r_txt) for r_txt in reason_map.get(fund_name, [])]
+                    reasons_html = "".join([f"<li style='margin-bottom:5px;'>{r_txt}</li>" for r_txt in styled_reasons]) or "<li>（際立った合致理由はありませんが、他候補との相対評価で選定されました）</li>"
                     st.markdown(f"""
-                    <div style="padding: 6px 0;">
+                    <div style="padding: 8px 0;">
                         <span style="font-weight: bold; color: #0f4c75; font-size: 18px;">{fund_name}</span>
                         <span style="color: #666; font-size: 15px;">（{company}／🗂️ {category}）</span>
-                        <ul style="margin: 4px 0 0 0; padding-left: 20px; font-size: 15px; color: #444;">{reasons_html}</ul>
+                        <ul style="margin: 6px 0 0 0; padding-left: 20px; font-size: 16px; line-height: 1.6; color: #333;">{reasons_html}</ul>
                     </div>
                     """, unsafe_allow_html=True)
             st.session_state.selected_funds = current_choices
