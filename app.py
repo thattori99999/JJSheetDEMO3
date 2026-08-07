@@ -1695,7 +1695,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r20（自由記述を肯定/否定ニュアンス判定つきの解析に強化）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r22（コア・サテライト運用の考え方を絞り込み判定・解説文生成の両方に追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2121,7 +2121,9 @@ FREE_TEXT_STOPWORDS = {
     "こと", "ため", "もの", "よう", "これ", "それ", "あの", "この", "です", "ます",
     "して", "いる", "ある", "なる", "たい", "など", "という", "ください", "予定",
     "希望", "場合", "くらい", "ぐらい", "ので", "から", "また", "そして", "しかし",
-    "資金", "運用", "投資", "商品", "対象", "検討", "考え", "少なめ", "多め", "当面"
+    "資金", "運用", "投資", "商品", "対象", "検討", "考え", "少なめ", "多め", "当面",
+    "ファンド", "その他", "以外", "選択", "選択したい", "銘柄", "タイプ", "保有",
+    "保有している", "持っている", "すでに", "既に", "現在", "自身", "本人",
 }
 
 
@@ -2134,7 +2136,7 @@ def extract_keywords_from_free_text(text, min_len=2):
     rough_tokens = re.split(r"[、。・/\s,.()（）\n【】「」]+", text)
     keywords = []
     for rt in rough_tokens:
-        sub_tokens = re.split(r"(?:について|に関心|に関する|のため|によって|とともに|は|が|を|に|の|で|と|へ|から|まで|より|も|や)", rt)
+        sub_tokens = re.split(r"(?:について|に関心|に関する|のため|によって|とともに|している|は|が|を|に|の|で|と|へ|から|まで|より|も|や)", rt)
         for st in sub_tokens:
             st = st.strip()
             if len(st) >= min_len and st not in FREE_TEXT_STOPWORDS:
@@ -2156,9 +2158,11 @@ NEGATION_CUES = [
     "避けたい", "苦手", "嫌い", "不要", "除きたい", "除外したい", "したくない",
     "興味がない", "望まない", "求めない", "多すぎる", "は嫌", "NG", "ダメ",
     "控えたい", "抵抗がある", "心配", "不安", "怖い", "リスクが高すぎる", "リスクを取りたくない",
+    "保有している", "持っている", "すでに保有", "既に保有", "保有中", "保有済み",
+    "既に持って", "持っています", "別のファンドで", "他のファンドで", "その他のファンドで",
 ]
 POSITIVE_CUES = [
-    "興味がある", "したい", "重視", "希望", "好き", "気になる", "検討したい",
+    "興味がある", "重視", "希望", "好き", "気になる", "検討したい",
     "求める", "優先", "興味を持って", "積極的に", "前向き", "魅力を感じ",
 ]
 
@@ -2182,8 +2186,10 @@ def analyze_free_text_sentiment(free_text):
             continue
         has_negation = any(cue in clause for cue in NEGATION_CUES)
         has_positive = any(cue in clause for cue in POSITIVE_CUES)
-        # 否定手がかりのみが存在する場合だけ「否定的」と判定し、それ以外（肯定手がかりのみ／両方／どちらもなし）は「肯定的」寄りに扱う
-        sentiment = "negative" if (has_negation and not has_positive) else "positive"
+        # 否定手がかりが存在する場合は「否定的」を優先する（肯定手がかりと同じ節に混在していても、
+        # 除外・保有済み等の否定的意向のほうが実務上重要度が高いため）。
+        # 否定手がかりが無く、肯定手がかりがある場合、またはどちらも無い場合は「肯定的」寄りに扱う。
+        sentiment = "negative" if has_negation else "positive"
         for kw in keywords:
             if kw in seen:
                 continue
@@ -2216,6 +2222,42 @@ def classify_fund_type(text):
         if any(k in text for k in keywords):
             return category
     return "その他・分類不明"
+
+
+# --- 🎯 コア・サテライト運用の考え方に基づく分類（AIを使わない、キーワードベースの決定的判定） ---
+# サテライト資産：テーマ型ファンド、新興国株式・債券、REIT、ハイ・イールド債、ブル・ベア型、オルタナティブ投資等
+# コア資産：それ以外（全世界株式・先進国株式・国内株式・伝統的な債券インデックス 等）
+#
+# ※ classify_fund_type() が判定した「投資対象の分類」を土台にしている。単純なキーワードの有無だけで判定すると、
+#   例えば「オルカン」のように全世界（先進国＋新興国）に分散投資するコア的な商品が、説明文中に
+#   「新興国」という語を含むというだけで誤って『サテライト資産』に分類されてしまう問題があったため、
+#   classify_fund_type が優先順位をつけて判定した「最も具体的な分類カテゴリ」をそのまま利用することで、
+#   このような誤判定を避けている。
+SATELLITE_CATEGORIES = {
+    "新興国株式型", "インド株式型",
+    "テーマ型株式（脱炭素・環境）", "テーマ型株式（テクノロジー）",
+    "バランス型（複合資産）",  # REITを含む複合資産型。ご指定の定義（REIT＝サテライト資産）に基づく
+}
+# classify_fund_type のカテゴリ体系に含まれない、追加のサテライト要素（原文キーワードで直接判定）
+SATELLITE_EXTRA_KEYWORDS = [
+    "ハイイールド", "ハイ・イールド", "高利回り債",
+    "ブル型", "ベア型", "ブル・ベア", "ブルベア",
+    "オルタナティブ", "コモディティ", "商品先物", "ヘッジファンド", "プライベートエクイティ",
+]
+
+
+def classify_core_satellite(text):
+    """コア・サテライト運用の考え方に基づき、ファンドを『コア資産』『サテライト資産』のいずれかに分類する。
+    定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。
+    上記に該当しないものはすべて『コア資産』として扱う。"""
+    if not text:
+        return "コア資産"
+    category = classify_fund_type(text)
+    if category in SATELLITE_CATEGORIES:
+        return "サテライト資産"
+    if any(k in text for k in SATELLITE_EXTRA_KEYWORDS):
+        return "サテライト資産"
+    return "コア資産"
 
 
 def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
@@ -2286,6 +2328,24 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
             if any(k in text for k in ["毎月決算", "毎月分配", "分配重視"]):
                 score += 3
                 reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、毎月決算型・分配重視型の商品であるため合致")
+
+        # ⑥.5 コア・サテライト運用の考え方との照合
+        # 定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。それ以外はコア資産。
+        core_sat_pref = hearing.get("core_satellite_pref", "特にこだわらない")
+        fund_core_sat = classify_core_satellite(text)
+        if core_sat_pref.startswith("コア資産（"):
+            if fund_core_sat == "コア資産":
+                score += 3
+                reasons.append(f"【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドは全世界・先進国・国内株式や伝統的債券等の『コア資産』に分類されるため合致")
+            else:
+                score -= 3
+                reasons.append(f"【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドはテーマ型・新興国・REIT・ハイイールド債等の『サテライト資産』に分類されるため減点")
+        elif core_sat_pref.startswith("コア資産をベースに"):
+            reasons.append(f"【コア・サテライト】お客様のご希望「コア資産をベースにサテライト資産も一部取り入れたい」に対し、本ファンドは『{fund_core_sat}』に分類されます（コア・サテライト双方をバランス良く組み合わせる観点でご検討ください）")
+        elif core_sat_pref.startswith("サテライト資産も積極的に"):
+            if fund_core_sat == "サテライト資産":
+                score += 3
+                reasons.append(f"【コア・サテライト】お客様のご希望「サテライト資産も積極的に組み入れ、プラスアルファのリターンを狙いたい」に対し、本ファンドはテーマ型・新興国・REIT等の『サテライト資産』に分類され、積極的なリターン追求のニーズに合致")
 
         # ⑦ 除外したい条件（こだわり条件）との照合
         for tag in hearing.get("avoid_tags", []):
@@ -2667,6 +2727,17 @@ def render_selection_content(active_api_key):
             index=4,
             key="result_asset_scale"
         )
+        core_satellite_pref = st.selectbox(
+            "コア・サテライト運用の考え方：",
+            options=[
+                "コア資産（全世界株式・先進国株式・国内株式・伝統的債券等）を中心に安定運用したい",
+                "コア資産をベースに、サテライト資産（テーマ型・新興国・REIT・ハイイールド債・オルタナティブ等）も一部取り入れたい",
+                "サテライト資産も積極的に組み入れ、プラスアルファのリターンを狙いたい",
+                "特にこだわらない",
+            ],
+            index=3,
+            key="result_core_satellite_pref"
+        )
         avoid_tags = st.multiselect(
             "除外したい条件（該当するものがあれば選択）：",
             options=["新興国", "レバレッジ", "ハイイールド", "テクノロジー", "脱炭素"],
@@ -2775,6 +2846,7 @@ def render_selection_content(active_api_key):
                 "purpose": purpose,
                 "nisa_pref": nisa_pref,
                 "fx_tolerance": fx_tolerance,
+                "core_satellite_pref": core_satellite_pref,
                 "avoid_tags": avoid_tags,
                 "free_text": free_text,
             }
@@ -2801,12 +2873,13 @@ def render_selection_content(active_api_key):
                 with col_info:
                     fund_text_for_cat = fund_data.get("text", "") if isinstance(fund_data, dict) else str(fund_data)
                     category = classify_fund_type(fund_text_for_cat)
+                    core_sat = classify_core_satellite(fund_text_for_cat)
                     styled_reasons = [re.sub(r"^(【[^】]+】)", r"<b style='color:#0f4c75;'>\1</b>", r_txt) for r_txt in reason_map.get(fund_name, [])]
                     reasons_html = "".join([f"<li style='margin-bottom:5px;'>{r_txt}</li>" for r_txt in styled_reasons]) or "<li>（際立った合致理由はありませんが、他候補との相対評価で選定されました）</li>"
                     st.markdown(f"""
                     <div style="padding: 8px 0;">
                         <span style="font-weight: bold; color: #0f4c75; font-size: 18px;">{fund_name}</span>
-                        <span style="color: #666; font-size: 15px;">（{company}／🗂️ {category}）</span>
+                        <span style="color: #666; font-size: 15px;">（{company}／🗂️ {category}／🎯 {core_sat}）</span>
                         <ul style="margin: 6px 0 0 0; padding-left: 20px; font-size: 16px; line-height: 1.6; color: #333;">{reasons_html}</ul>
                     </div>
                     """, unsafe_allow_html=True)
@@ -3206,6 +3279,7 @@ def render_result_page():
         selected_horizon = st.session_state.get("result_horizon", "特にこだわらない")
         selected_fx = st.session_state.get("result_fx_tolerance", "特にこだわらない")
         selected_nisa_pref = st.session_state.get("result_nisa_pref", "特にこだわらない")
+        selected_core_satellite_pref = st.session_state.get("result_core_satellite_pref", "特にこだわらない")
         selected_avoid_tags = st.session_state.get("result_avoid_tags", [])
         selected_existing_assets = st.session_state.get("result_existing_assets", [])
         selected_asset_scale = st.session_state.get("result_asset_scale", "回答しない")
@@ -3236,6 +3310,8 @@ def render_result_page():
                 extra_profile_lines.append(f"・為替リスクの許容度：{selected_fx}")
             if selected_nisa_pref != "特にこだわらない":
                 extra_profile_lines.append(f"・NISA活用の意向：{selected_nisa_pref}")
+            if selected_core_satellite_pref != "特にこだわらない":
+                extra_profile_lines.append(f"・コア・サテライト運用の考え方：{selected_core_satellite_pref}")
             if selected_existing_assets:
                 extra_profile_lines.append(f"・現在保有している金融資産：{'、'.join(selected_existing_assets)}")
             if selected_asset_scale != "回答しない":
@@ -3259,8 +3335,15 @@ def render_result_page():
 ・特にお客様の年齢層（若年層であれば長期投資の複利メリット、シニア層であれば流動性の確保や取り崩しフェーズへの適応など）に考慮し、投資期間を想定した最適なアプローチをアドバイスに含めてください。
 ・お客様の「投資目的」と照らし合わせ、今回の各ファンドが資産形成の目標達成にどう機能するのか（あるいはどのような点で注意が必要か）を丁寧に整理してください。
 ・お客様の「リスク許容度」と照らし合わせて、5年の実績最低・最高値から想定されるボラティリティ（ブレ幅）が、このお客様の許容範囲内に収まるアセットバランスなのかを論理的かつ誠実に分析・解説してください。
-・上記の追加項目（運用期間・為替許容度・NISA意向・除外条件・自由記述）が設定されている場合は、それらの内容も踏まえて整合性のとれた解説をしてください。ただし、記載のない前提を勝手に補って断定しないでください。
+・上記の追加項目（運用期間・為替許容度・NISA意向・コア・サテライト運用の考え方・除外条件・自由記述）が設定されている場合は、それらの内容も踏まえて整合性のとれた解説をしてください。ただし、記載のない前提を勝手に補って断定しないでください。
 ・「魅力的」などの売り込み・押し売り表現は徹底的に排除し、お客様が主体的に賢い判断を下せるよう、中立的かつ客観的なファクトベース of 道標となる説明に徹してください。
+
+【コア・サテライト運用の考え方（分類定義）】
+各ファンドを比較・解説する際は、以下の定義に基づいて「コア資産」「サテライト資産」のいずれに該当するかを踏まえて説明してください（この定義は絞り込み機能で使用しているものと同一です。表記も統一してください）。
+・サテライト資産：テーマ型ファンド（脱炭素・テクノロジー・サイバーセキュリティ・インパクト投資等）、新興国株式・債券、REIT（不動産投資信託証券）、ハイ・イールド債、ブル・ベア型、オルタナティブ投資（コモディティ・ヘッジファンド等）
+・コア資産：上記に該当しない、全世界株式・先進国株式・国内株式インデックスや伝統的な債券等の基本的な資産クラス
+・お客様が「コア・サテライト運用の考え方」を選択されている場合は、比較対象ファンドがそれぞれコア資産・サテライト資産のどちらに該当するかを明示し、お客様のご希望（安定重視でコア中心か、プラスアルファを狙いサテライトも組み入れるか）との整合性を具体的に解説してください。
+・断定的な配分比率の推奨（「コア○％・サテライト○％にすべき」等）は避け、あくまで各ファンドの位置づけの説明と、お客様の意向との整合性の解説に留めてください。
 """
 
         with st.spinner("金融AIアシスタントが重要情報シートを精緻に分析し、詳細解説レポートを自動作成しております。今しばらくお待ちください..."):
