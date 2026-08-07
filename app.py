@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r27（絞り込み前に選定方針・優先順位の解説を表示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r28（score_and_narrow_funds関数定義の欠落を修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2673,7 +2673,7 @@ def build_selection_policy(hearing):
     return {"purpose_guidance": purpose_guidance, "priority_list": priority_list}
 
 
-
+def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
     """全ファンドの原文テキストと、ヒアリングで得た顧客属性を照合し、
     ルールベースのスコアリングにより候補を上位N件に絞り込む。
     戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
