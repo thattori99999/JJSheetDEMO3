@@ -946,7 +946,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r13（散布図の全フォントを比較表と同程度に拡大）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r15（ヒアリング項目に保有金融資産を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -1358,6 +1358,83 @@ def get_cell(df, item_name, fund_name):
         return "記載なし（抽出スキップ）"
 
 
+# --- 🎯 顧客属性による候補ファンドの絞り込み（AIを使わない、コード側の決定的なルールベース判定） ---
+# ※選定ロジックそのものはAIの自由生成に一切依存させず、重要情報シートの原文に含まれる
+#   キーワード・数値の有無のみで判定することで、再現性・検証可能性を担保している。
+RISKY_KEYWORDS = ["新興国", "レバレッジ", "カントリーリスク", "インド", "テクノロジー", "脱炭素", "ハイイールド", "信用リスクが高", "元本超過"]
+
+
+def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
+    """全ファンドの原文テキストと、ヒアリングで得た顧客属性を照合し、
+    ルールベースのスコアリングにより候補を上位N件に絞り込む。
+    戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
+    results = []
+    for name in fund_list:
+        data = uploaded_funds.get(name, {})
+        text = data.get("text", "") if isinstance(data, dict) else str(data)
+        score = 0
+        reasons = []
+
+        # ① 信託報酬（コスト）の抽出
+        trust_match = re.search(r"信託報酬[^\d]{0,25}(\d+\.?\d*)\s*[%％]", text)
+        trust_pct = float(trust_match.group(1)) if trust_match else None
+
+        # ② リスク許容度との照合
+        risk_hits = sum(1 for k in RISKY_KEYWORDS if k in text)
+        tol = hearing.get("tolerance_level", "普通")
+        if tol == "低い":
+            if risk_hits == 0:
+                score += 3
+                reasons.append("値動きの大きい資産（新興国・レバレッジ等）を含まず、低いリスク許容度に合致")
+            else:
+                score -= 3 * risk_hits
+        elif tol == "高い":
+            if risk_hits >= 1:
+                score += 2
+                reasons.append("積極的な運用を求めるニーズに沿った、値動きの大きい資産を含む")
+        else:  # 普通
+            if risk_hits <= 1:
+                score += 1
+
+        # ③ コスト（低コストをやや優遇。ただし決定的な足切りにはしない）
+        if trust_pct is not None:
+            if trust_pct < 0.5:
+                score += 1.5
+                reasons.append(f"信託報酬が年率{trust_pct:g}%と低水準")
+            elif trust_pct > 1.5 and tol == "低い":
+                score -= 1
+
+        # ④ NISA活用意向との照合
+        nisa_pref = hearing.get("nisa_pref", "")
+        if nisa_pref == "つみたて投資枠を使いたい" and "つみたて投資枠" in text:
+            score += 2
+            reasons.append("NISAつみたて投資枠の対象商品")
+        elif nisa_pref == "成長投資枠を使いたい" and "成長投資枠" in text:
+            score += 2
+            reasons.append("NISA成長投資枠の対象商品")
+
+        # ⑤ 為替リスク許容度との照合
+        fx_pref = hearing.get("fx_tolerance", "")
+        has_fx_exposure = any(k in text for k in ["為替変動リスク", "外国", "為替ヘッジなし"])
+        if fx_pref == "為替リスクは避けたい（国内資産中心）":
+            if not has_fx_exposure:
+                score += 2
+                reasons.append("為替変動リスクの記載がなく、国内資産中心のニーズに合致")
+            else:
+                score -= 2
+
+        # ⑥ 除外したい条件（こだわり条件）との照合
+        for tag in hearing.get("avoid_tags", []):
+            if tag and tag in text:
+                score -= 5
+                reasons.append(f"除外条件「{tag}」に該当するため大幅減点")
+
+        results.append({"fund": name, "score": round(score, 1), "reasons": reasons})
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_n]
+
+
 # APIキーのアクティブ状態を画面上で可視化するUIヘルパー
 def display_api_key_status_bar():
     custom_key_raw = st.session_state.get("custom_key", "").strip()
@@ -1617,58 +1694,18 @@ def render_selection_content(active_api_key):
         """, unsafe_allow_html=True)
         return
 
-    st.markdown("<p style='font-size: 20px; margin-bottom: 20px;'>比較を行いたいファンドの左側にある「選択」列にチェックを入れ、ターゲット層の設定を行ってください。<br><span style='color: #0f4c75; font-weight: bold;'>※ あらかじめ最新5つの重要情報シートPDFデータが自動的にロードされています。手動アップロードなしでもそのまま比較頂けます。</span></p>", unsafe_allow_html=True)
-    
     fund_list = list(st.session_state.uploaded_funds.keys())
 
-    # --- 🔲 コンパクトなテーブル形式のヘッダー ---
-    st.markdown("""
-    <div style="background-color: #0f4c75; padding: 10px 15px; border-radius: 12px 12px 0 0; color: white; display: flex; font-weight: bold; font-size: 22px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-        <div style="flex: 1.5; text-align: center; border-right: 1px solid rgba(255,255,255,0.2);">選択</div>
-        <div style="flex: 3.5; padding-left: 20px; border-right: 1px solid rgba(255,255,255,0.2);">運用会社</div>
-        <div style="flex: 5; padding-left: 20px;">ファンド名</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    current_choices = []
-    
-    # 各ファンド情報を1行ずつテーブル状にマッピング
-    for idx, fund_name in enumerate(fund_list):
-        fund_data = st.session_state.uploaded_funds[fund_name]
-        
-        if isinstance(fund_data, dict):
-            company = fund_data.get("company", "特定できませんでした")
-        else:
-            company = "特定できませんでした（再登録をお願いいたします）"
-            
-        bg_class = "fund-row-light" if idx % 2 == 0 else "fund-row-dark"
-        col_sel, col_com, col_fn = st.columns([1.5, 3.5, 5])
-        
-        with col_sel:
-            default_value = fund_name in st.session_state.selected_funds
-            is_checked = st.checkbox("", value=default_value, key=f"chk_{fund_name}", label_visibility="collapsed")
-            if is_checked:
-                current_choices.append(fund_name)
-                
-        with col_com:
-            st.markdown(f"<div class='fund-text-company'>{company}</div>", unsafe_allow_html=True)
-            
-        with col_fn:
-            st.markdown(f"<div class='fund-text-name {bg_class}'>{fund_name}</div>", unsafe_allow_html=True)
-        
-    st.session_state.selected_funds = current_choices
-    
-    # --- 🎯 解説ターゲットの属性設定（お客様向け） ---
-    st.markdown("---")
-    st.markdown("<div class='form-title'>🎯 お客様の属性設定</div>", unsafe_allow_html=True)
-    st.markdown("お客様の属性（年齢層・投資経験・目的・リスク許容度）に合わせて、AIロボが解説難易度や分析軸を完全オーダーメイドで最適化いたします。")
+    # --- 🎯 お客様の属性設定（ヒアリング項目。解説の最適化、および絞り込みモードでの候補選定の両方に使用） ---
+    st.markdown("<div class='form-title'>🎯 お客様の属性設定（ヒアリング）</div>", unsafe_allow_html=True)
+    st.markdown("お客様の属性に合わせて、AIロボが解説の難易度・切り口を最適化します。また、下部の「絞り込みモード」をご利用の場合、これらの情報が候補ファンドの選定にも使用されます。")
 
     # 対象は常にお客様向け解説として固定
     target_type = "顧客（お客様ご自身への直接説明）向け"
     st.session_state["result_target_type"] = target_type
 
     with st.container(border=True):
-        st.markdown("##### 👤 お客様の属性プロフィールを設定してください")
+        st.markdown("##### 👤 お客様の属性プロフィール（基本項目）")
         age_range = st.selectbox(
             "お客様の年齢層：",
             options=[
@@ -1716,6 +1753,161 @@ def render_selection_content(active_api_key):
             key="result_tolerance"
         )
 
+        st.markdown("##### 📋 お客様の属性プロフィール（追加項目・任意）")
+        horizon = st.selectbox(
+            "想定運用期間：",
+            options=["3年未満（短期）", "3〜10年（中期）", "10年超（長期）", "特にこだわらない"],
+            index=3,
+            key="result_horizon"
+        )
+        fx_tolerance = st.selectbox(
+            "為替リスクの許容度：",
+            options=["為替リスクは避けたい（国内資産中心）", "ある程度は許容できる", "特にこだわらない"],
+            index=2,
+            key="result_fx_tolerance"
+        )
+        nisa_pref = st.selectbox(
+            "NISA活用の意向：",
+            options=["つみたて投資枠を使いたい", "成長投資枠を使いたい", "特にこだわらない"],
+            index=2,
+            key="result_nisa_pref"
+        )
+        existing_assets = st.multiselect(
+            "現在保有している金融資産（複数選択可）：",
+            options=[
+                "預貯金のみ", "投資信託", "国内株式", "外国株式", "債券",
+                "貯蓄性保険", "NISA口座（つみたて投資枠）利用中", "NISA口座（成長投資枠）利用中",
+                "iDeCo", "不動産（投資用）", "特になし・分からない"
+            ],
+            default=[],
+            key="result_existing_assets"
+        )
+        asset_scale = st.selectbox(
+            "保有金融資産の規模目安（任意・回答いただける範囲で結構です）：",
+            options=["500万円未満", "500万円〜2,000万円", "2,000万円〜5,000万円", "5,000万円以上", "回答しない"],
+            index=4,
+            key="result_asset_scale"
+        )
+        avoid_tags = st.multiselect(
+            "除外したい条件（該当するものがあれば選択）：",
+            options=["新興国", "レバレッジ", "ハイイールド", "テクノロジー", "脱炭素"],
+            default=[],
+            key="result_avoid_tags"
+        )
+        free_text = st.text_area(
+            "その他、お客様についての自由記述（任意）：",
+            placeholder="例：住宅ローン返済中で当面の余裕資金は少なめ／数年以内に教育資金の取り崩し予定あり／ESG投資に関心がある　など、上記の項目でカバーしきれない情報があれば自由にご記入ください。",
+            key="result_free_text",
+            height=90
+        )
+
+    st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+
+    # --- 🗂️ 比較方法の選択（自分で選ぶ／AIロボに絞り込んでもらう） ---
+    st.markdown("---")
+    st.markdown("<div class='form-title'>🗂️ 比較方法の選択</div>", unsafe_allow_html=True)
+    comparison_mode = st.radio(
+        "比較方法をお選びください：",
+        options=[
+            "🗂️ 比較したいファンドを自分で選ぶ（従来通り）",
+            "🎯 お客様の属性から、AIロボに候補ファンドを絞り込んでもらう"
+        ],
+        index=0,
+        key="comparison_mode"
+    )
+    is_narrowing_mode = "絞り込んでもらう" in comparison_mode
+
+    current_choices = []
+
+    if not is_narrowing_mode:
+        # === 従来通り：手動選択モード ===
+        st.markdown("<p style='font-size: 18px; margin: 15px 0 10px 0;'>比較を行いたいファンドの左側にある「選択」列にチェックを入れてください。<br><span style='color: #0f4c75; font-weight: bold;'>※ あらかじめ最新の重要情報シートPDFデータが自動的にロードされています。手動アップロードなしでもそのまま比較頂けます。</span></p>", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style="background-color: #0f4c75; padding: 10px 15px; border-radius: 12px 12px 0 0; color: white; display: flex; font-weight: bold; font-size: 22px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+            <div style="flex: 1.5; text-align: center; border-right: 1px solid rgba(255,255,255,0.2);">選択</div>
+            <div style="flex: 3.5; padding-left: 20px; border-right: 1px solid rgba(255,255,255,0.2);">運用会社</div>
+            <div style="flex: 5; padding-left: 20px;">ファンド名</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for idx, fund_name in enumerate(fund_list):
+            fund_data = st.session_state.uploaded_funds[fund_name]
+            if isinstance(fund_data, dict):
+                company = fund_data.get("company", "特定できませんでした")
+            else:
+                company = "特定できませんでした（再登録をお願いいたします）"
+
+            bg_class = "fund-row-light" if idx % 2 == 0 else "fund-row-dark"
+            col_sel, col_com, col_fn = st.columns([1.5, 3.5, 5])
+
+            with col_sel:
+                default_value = fund_name in st.session_state.selected_funds
+                is_checked = st.checkbox("", value=default_value, key=f"chk_{fund_name}", label_visibility="collapsed")
+                if is_checked:
+                    current_choices.append(fund_name)
+            with col_com:
+                st.markdown(f"<div class='fund-text-company'>{company}</div>", unsafe_allow_html=True)
+            with col_fn:
+                st.markdown(f"<div class='fund-text-name {bg_class}'>{fund_name}</div>", unsafe_allow_html=True)
+
+        st.session_state.selected_funds = current_choices
+
+    else:
+        # === 絞り込みモード：AIロボ（実際はコード側のルールベース判定）が候補を選定 ===
+        st.markdown("""
+        <div style="background-color: #eef6fc; border-left: 5px solid #0081c9; padding: 14px 18px; border-radius: 8px; margin: 15px 0;">
+            <span style="font-size: 16px; color: #1a1a1a;">上で入力いただいたお客様の属性をもとに、候補ファンドを自動で絞り込みます。<br>
+            ※選定は生成AIの自由記述ではなく、重要情報シートに記載された内容とお客様属性を照合する<b>ルールベースの判定</b>によって行われます（判定根拠は結果画面で確認できます）。<br>
+            ※選定後も、下に表示される候補一覧でチェックを外す・追加するなど、最終的な調整が可能です。</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        top_n = st.selectbox("候補として絞り込むファンド数の目安：", options=[3, 5, 8], index=1, key="narrowing_top_n")
+
+        if st.button("🔍 候補ファンドを絞り込む"):
+            hearing = {
+                "tolerance_level": (
+                    "低い" if ("低い" in tolerance or "非常に低い" in tolerance) else
+                    "高い" if ("高い" in tolerance) else "普通"
+                ),
+                "nisa_pref": nisa_pref,
+                "fx_tolerance": fx_tolerance,
+                "avoid_tags": avoid_tags,
+            }
+            narrowed = score_and_narrow_funds(fund_list, st.session_state.uploaded_funds, hearing, top_n=top_n)
+            st.session_state.narrowing_results = narrowed
+            st.session_state.selected_funds = [r["fund"] for r in narrowed]
+            st.rerun()
+
+        narrowing_results = st.session_state.get("narrowing_results", [])
+        if narrowing_results:
+            reason_map = {r["fund"]: r["reasons"] for r in narrowing_results}
+            st.markdown("##### ✅ 絞り込み結果（チェックを調整して最終確定できます）")
+            for idx, r in enumerate(narrowing_results):
+                fund_name = r["fund"]
+                fund_data = st.session_state.uploaded_funds.get(fund_name, {})
+                company = fund_data.get("company", "特定できませんでした") if isinstance(fund_data, dict) else "特定できませんでした"
+
+                col_sel, col_info = st.columns([1, 9])
+                with col_sel:
+                    default_value = fund_name in st.session_state.selected_funds
+                    is_checked = st.checkbox("", value=default_value, key=f"chk_narrow_{fund_name}", label_visibility="collapsed")
+                    if is_checked:
+                        current_choices.append(fund_name)
+                with col_info:
+                    reasons_html = "".join([f"<li style='margin-bottom:2px;'>{r_txt}</li>" for r_txt in reason_map.get(fund_name, [])]) or "<li>（際立った合致理由はありませんが、他候補との相対評価で選定されました）</li>"
+                    st.markdown(f"""
+                    <div style="padding: 6px 0;">
+                        <span style="font-weight: bold; color: #0f4c75; font-size: 18px;">{fund_name}</span>
+                        <span style="color: #666; font-size: 15px;">（{company}）</span>
+                        <ul style="margin: 4px 0 0 0; padding-left: 20px; font-size: 15px; color: #444;">{reasons_html}</ul>
+                    </div>
+                    """, unsafe_allow_html=True)
+            st.session_state.selected_funds = current_choices
+        else:
+            st.info("「🔍 候補ファンドを絞り込む」ボタンを押すと、ここに候補が表示されます。")
+
     st.markdown("<div style='margin-top: 25px;'></div>", unsafe_allow_html=True)
 
     # 比較表を作成するかどうかの事前選択（オフにすると解説レポート表示までの時間を短縮できます）
@@ -1738,10 +1930,12 @@ def render_selection_content(active_api_key):
 
     if clear_btn:
         st.session_state.selected_funds = []
+        st.session_state.narrowing_results = []
         for fund_name in fund_list:
-            chk_key = f"chk_{fund_name}"
-            if chk_key in st.session_state:
-                del st.session_state[chk_key]
+            for prefix in ("chk_", "chk_narrow_"):
+                chk_key = f"{prefix}{fund_name}"
+                if chk_key in st.session_state:
+                    del st.session_state[chk_key]
         st.success("ファンドのチェックをすべて解除いたしました。")
         st.rerun()
 
@@ -2103,6 +2297,13 @@ def render_result_page():
         selected_experience = st.session_state.get("result_experience", "初心者")
         selected_purpose = st.session_state.get("result_purpose", "長期資産形成")
         selected_tolerance = st.session_state.get("result_tolerance", "普通")
+        selected_horizon = st.session_state.get("result_horizon", "特にこだわらない")
+        selected_fx = st.session_state.get("result_fx_tolerance", "特にこだわらない")
+        selected_nisa_pref = st.session_state.get("result_nisa_pref", "特にこだわらない")
+        selected_avoid_tags = st.session_state.get("result_avoid_tags", [])
+        selected_existing_assets = st.session_state.get("result_existing_assets", [])
+        selected_asset_scale = st.session_state.get("result_asset_scale", "回答しない")
+        selected_free_text = st.session_state.get("result_free_text", "").strip()
         
         if "担当者" in target_type:
             target_persona_instruction = """
@@ -2122,6 +2323,23 @@ def render_result_page():
             else:
                 exp_detail = "投資経験が極めて豊富で上級者レベルです。ポートフォリオ全体への相関効果、アセットクラス特有 of ベータ値やシャープレシオなどの金融工学的なデータも交え、緻密で高度なロジカル分散投資分析を提供してください。"
 
+            extra_profile_lines = []
+            if selected_horizon != "特にこだわらない":
+                extra_profile_lines.append(f"・想定運用期間：{selected_horizon}")
+            if selected_fx != "特にこだわらない":
+                extra_profile_lines.append(f"・為替リスクの許容度：{selected_fx}")
+            if selected_nisa_pref != "特にこだわらない":
+                extra_profile_lines.append(f"・NISA活用の意向：{selected_nisa_pref}")
+            if selected_existing_assets:
+                extra_profile_lines.append(f"・現在保有している金融資産：{'、'.join(selected_existing_assets)}")
+            if selected_asset_scale != "回答しない":
+                extra_profile_lines.append(f"・保有金融資産の規模目安：{selected_asset_scale}")
+            if selected_avoid_tags:
+                extra_profile_lines.append(f"・除外を希望する条件：{'、'.join(selected_avoid_tags)}")
+            if selected_free_text:
+                extra_profile_lines.append(f"・その他の自由記述（担当者からの補足情報）：{selected_free_text}")
+            extra_profile_text = ("\n" + "\n".join(extra_profile_lines)) if extra_profile_lines else ""
+
             target_persona_instruction = f"""
 【解説ターゲット：顧客（お客様ご自身への直接丁寧なアドバイス）】
 この解説は、以下のプロフィールを持つお客様ご自身が直接お読みになり、意思決定を行うための丁寧な解説です。
@@ -2129,12 +2347,13 @@ def render_result_page():
 ・お客様の年齢層：{selected_age}
 ・お客様の投資経験：{selected_experience} （解説難度アプローチ：{exp_detail}）
 ・お客様の投資目的：{selected_purpose}
-・お客様のリスク許容度：{selected_tolerance}
+・お客様のリスク許容度：{selected_tolerance}{extra_profile_text}
 
 上記のプロファイルに極めて高度に寄り添った、親切で説得力のある説明を行ってください。
 ・特にお客様の年齢層（若年層であれば長期投資の複利メリット、シニア層であれば流動性の確保や取り崩しフェーズへの適応など）に考慮し、投資期間を想定した最適なアプローチをアドバイスに含めてください。
 ・お客様の「投資目的」と照らし合わせ、今回の各ファンドが資産形成の目標達成にどう機能するのか（あるいはどのような点で注意が必要か）を丁寧に整理してください。
 ・お客様の「リスク許容度」と照らし合わせて、5年の実績最低・最高値から想定されるボラティリティ（ブレ幅）が、このお客様の許容範囲内に収まるアセットバランスなのかを論理的かつ誠実に分析・解説してください。
+・上記の追加項目（運用期間・為替許容度・NISA意向・除外条件・自由記述）が設定されている場合は、それらの内容も踏まえて整合性のとれた解説をしてください。ただし、記載のない前提を勝手に補って断定しないでください。
 ・「魅力的」などの売り込み・押し売り表現は徹底的に排除し、お客様が主体的に賢い判断を下せるよう、中立的かつ客観的なファクトベース of 道標となる説明に徹してください。
 """
 
