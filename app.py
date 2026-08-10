@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r28（score_and_narrow_funds関数定義の欠落を修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r30（自由記述欄の解釈にAIによる文章理解を導入）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2539,6 +2539,73 @@ def analyze_free_text_sentiment(free_text):
     return results
 
 
+def interpret_free_text_via_ai(free_text, api_key):
+    """自由記述欄の内容を、AI（Gemini）に文章として理解させ、そこに含まれる投資判断上の
+    トピック（資産クラス・地域・テーマ・既に保有している商品名など）と、それぞれが
+    お客様にとって『肯定的な関心事』なのか『除外したい否定的な事柄』なのかを判定する。
+    ※ヒアリングの他の項目（リスク許容度・コスト方針等）は引き続きコード側の決定的なルール判定のままであり、
+    AIによる意味理解を用いるのは、この自由記述欄の解釈のみに限定している。
+    APIキー未設定・通信エラー・JSON解析失敗など、何らかの理由でAI呼び出しが行えない場合は、
+    安全側の代替として、従来のルールベース判定（analyze_free_text_sentiment）に自動的に切り替える。
+    戻り値：[{"keyword": str, "sentiment": "positive"|"negative", "clause": str}, ...]"""
+    if not free_text or not free_text.strip():
+        return []
+    if not api_key:
+        return analyze_free_text_sentiment(free_text)
+
+    prompt = f"""あなたは、投資信託の顧客ヒアリングシートに書かれた自由記述文を分析するアシスタントです。
+以下の【自由記述文】を読み、そこに含まれる投資判断に関連する具体的なトピック（資産クラス、地域、テーマ、既に保有している商品名、ライフイベント等）を抽出してください。
+それぞれのトピックについて、お客様が「肯定的な関心事・重視したい事項」として述べているのか、「除外したい・避けたい否定的な事項」として述べているのかを、文脈から判断してください。
+「既に保有している」という記述は、通常そのトピックを新たに勧める必要がないという意味であるため、否定的（除外したい事項）として扱ってください。
+
+出力は、以下のJSON形式のみとし、説明文やコードブロックの記号などは一切含めないでください。
+{{
+  "topics": [
+    {{"keyword": "トピックを表す具体的な単語（1〜10文字程度。例：ESG投資、新興国、オルカン、REIT）", "sentiment": "positive または negative", "reason": "判断の根拠となった元の文の一部（20文字程度に要約）"}}
+  ]
+}}
+該当するトピックが無い場合は "topics": [] としてください。
+
+【自由記述文】
+{free_text}
+"""
+
+    for attempt in range(3):
+        try:
+            genai.configure(api_key=api_key)
+            target_model = get_safe_model_name(api_key)
+            model = genai.GenerativeModel(
+                target_model,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            response = model.generate_content(prompt)
+            raw = response.text.strip()
+            cleaned = re.sub(r"^```json\s*|```$", "", raw, flags=re.MULTILINE).strip()
+            parsed = json.loads(cleaned)
+            topics = parsed.get("topics", [])
+            results = []
+            for t in topics:
+                if not isinstance(t, dict):
+                    continue
+                keyword = str(t.get("keyword", "")).strip()
+                sentiment = str(t.get("sentiment", "")).strip().lower()
+                reason = str(t.get("reason", "")).strip()
+                if not keyword or sentiment not in ("positive", "negative"):
+                    continue
+                results.append({"keyword": keyword, "sentiment": sentiment, "clause": reason or free_text})
+            return results
+        except (exceptions.ResourceExhausted, Exception) as e:
+            error_msg = str(e)
+            if "429" in error_msg or isinstance(e, exceptions.ResourceExhausted):
+                time.sleep((attempt + 1) * 5)
+                continue
+            # JSON解析失敗・その他のエラーは、ルールベース判定へフォールバックする
+            return analyze_free_text_sentiment(free_text)
+
+    # 複数回リトライしても解決しない場合も、ルールベース判定へフォールバックする
+    return analyze_free_text_sentiment(free_text)
+
+
 # --- 🗂️ ファンド分類（投資対象の分類）の判定（AIを使わない、キーワードベースの決定的分類） ---
 FUND_CATEGORY_RULES = [
     ("全世界株式型", ["全世界", "オール・カントリー", "オルカン"]),
@@ -2673,11 +2740,13 @@ def build_selection_policy(hearing):
     return {"purpose_guidance": purpose_guidance, "priority_list": priority_list}
 
 
-def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5):
+def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=None):
     """全ファンドの原文テキストと、ヒアリングで得た顧客属性を照合し、
     ルールベースのスコアリングにより候補を上位N件に絞り込む。
+    ※自由記述欄の解釈のみ、AI（Gemini）による文章の意味理解を用いる（api_key指定時）。
+    それ以外の項目（リスク許容度・コスト方針等）は、引き続きコード側の決定的なルール判定のまま。
     戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
-    free_text_items = analyze_free_text_sentiment(hearing.get("free_text", ""))
+    free_text_items = interpret_free_text_via_ai(hearing.get("free_text", ""), api_key)
 
     results = []
     for name in fund_list:
@@ -3202,7 +3271,7 @@ def render_selection_content(active_api_key):
             key="result_free_text",
             height=110
         )
-        st.caption("💡 この自由記述欄の内容は、解説文の内容だけでなく、絞り込みモードでの候補選定の優先度にも反映されます。定型項目だけでは伝わらないニュアンスがあれば、ぜひご記入ください。")
+        st.caption("💡 この自由記述欄の内容は、解説文の内容だけでなく、絞り込みモードでの候補選定の優先度にも反映されます。定型項目だけでは伝わらないニュアンスがあれば、ぜひご記入ください。\n※他の項目とは異なり、この自由記述欄のみ、内容の解釈にAI（生成AI）による文章理解を用います（AIが利用できない場合は簡易なキーワード判定に自動的に切り替わります）。")
 
     st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
 
@@ -3276,11 +3345,11 @@ def render_selection_content(active_api_key):
         st.session_state.selected_funds = current_choices
 
     else:
-        # === 絞り込みモード：AIロボ（実際はコード側のルールベース判定）が候補を選定 ===
+        # === 絞り込みモード：コード側のルールベース判定（自由記述欄のみAIによる意味理解を併用）で候補を選定 ===
         st.markdown("""
         <div style="background-color: #eef6fc; border-left: 5px solid #0081c9; padding: 14px 18px; border-radius: 8px; margin: 15px 0;">
             <span style="font-size: 16px; color: #1a1a1a;">上で入力いただいたお客様の属性をもとに、候補ファンドを自動で絞り込みます。<br>
-            ※選定は生成AIの自由記述ではなく、重要情報シートに記載された内容とお客様属性を照合する<b>ルールベースの判定</b>によって行われます（判定根拠は結果画面で確認できます）。<br>
+            ※選定は、重要情報シートに記載された内容とお客様属性を照合する<b>ルールベースの判定</b>によって行われます（判定根拠は結果画面で確認できます）。ただし<b>自由記述欄の内容の解釈のみ</b>、AI（生成AI）による文章理解を用います。<br>
             ※選定後も、下に表示される候補一覧でチェックを外す・追加するなど、最終的な調整が可能です。</span>
         </div>
         """, unsafe_allow_html=True)
@@ -3326,13 +3395,18 @@ def render_selection_content(active_api_key):
         top_n = st.selectbox("候補として絞り込むファンド数の目安：", options=[3, 5, 8], index=1, key="narrowing_top_n")
 
         if st.button("🔍 候補ファンドを絞り込む"):
-            narrowed = score_and_narrow_funds(fund_list, st.session_state.uploaded_funds, hearing, top_n=top_n)
+            narrowed = score_and_narrow_funds(fund_list, st.session_state.uploaded_funds, hearing, top_n=top_n, api_key=active_api_key)
             st.session_state.narrowing_results = narrowed
+            # この結果がどのヒアリング内容に基づくものかを記録しておく（後で入力内容とズレていないか判定するため）
+            st.session_state.narrowing_hearing_snapshot = hearing.copy()
             st.session_state.selected_funds = [r["fund"] for r in narrowed]
             st.rerun()
 
         narrowing_results = st.session_state.get("narrowing_results", [])
         if narrowing_results:
+            hearing_snapshot = st.session_state.get("narrowing_hearing_snapshot")
+            if hearing_snapshot is not None and hearing_snapshot != hearing:
+                st.warning("⚠️ 上のヒアリング内容が、下に表示されている絞り込み結果を作成した時点の内容から変更されています。最新の内容を反映するには、もう一度「🔍 候補ファンドを絞り込む」を押してください。")
             reason_map = {r["fund"]: r["reasons"] for r in narrowing_results}
             st.markdown("##### ✅ 絞り込み結果（チェックを調整して最終確定できます）")
             st.caption("※スコアが同点の場合は、信託報酬（コスト）がより低いファンドを優先して表示しています。")
@@ -3387,6 +3461,7 @@ def render_selection_content(active_api_key):
     if clear_btn:
         st.session_state.selected_funds = []
         st.session_state.narrowing_results = []
+        st.session_state.narrowing_hearing_snapshot = None
         for fund_name in fund_list:
             for prefix in ("chk_", "chk_narrow_"):
                 chk_key = f"{prefix}{fund_name}"
