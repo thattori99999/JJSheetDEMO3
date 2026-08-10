@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r30（自由記述欄の解釈にAIによる文章理解を導入）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r31（NISA区分の否定文誤判定を修正、不一致時の減点を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2398,25 +2398,39 @@ def compute_effective_cost(purchase_fee_text, trust_fee_text):
         return "記載なし（抽出スキップ）"
 
 
+def fund_supports_nisa_frame(text, frame_label):
+    """指定したNISA区分（『成長投資枠』または『つみたて投資枠』）に、ファンドが実際に
+    対象となっているかどうかを判定する。
+    ※単純に frame_label という文字列が本文に含まれているかどうかだけで判定すると、
+    「NISA成長投資枠およびNISAつみたて投資枠の対象商品ではありません。」のような
+    否定文にも frame_label の文字列自体は含まれてしまうため、対象外のファンドを
+    誤って『対象』と判定してしまう不具合があった。「ではありません」等の否定表現が
+    同じ文（句点まで）に続く場合は、対象外として正しく判定する。"""
+    if not text or frame_label not in text:
+        return False
+    negative_pattern = re.compile(re.escape(frame_label) + r"[^。]*(?:ではありません|ではございません|の対象ではありません)")
+    if negative_pattern.search(text):
+        return False
+    return True
+
+
 def simplify_nisa(nisa_text):
-    """詳細なNISA区分の文言から『対象の有無』のみを簡潔に判定して返す。"""
+    """詳細なNISA区分の文言から『対象の有無』のみを簡潔に判定して返す。
+    ※「対象商品ではありません」という否定文脈も正しく判定できるよう、
+    fund_supports_nisa_frame() と同じ否定検出ロジックを用いる。"""
     if not nisa_text:
         return "記載なし（抽出スキップ）"
     text = str(nisa_text).strip()
     if "記載なし" in text or "抽出スキップ" in text:
         return text
-    no_keywords = ["対象外", "対象ではありません", "適用されません", "非対象", "なし"]
-    if any(k in text for k in no_keywords) and not any(k in text for k in ["つみたて", "成長投資枠"]):
-        return "対象外"
-    # 対象の場合、可能であれば枠の種類も併記する
     types = []
-    if "つみたて" in text:
+    if fund_supports_nisa_frame(text, "つみたて投資枠"):
         types.append("つみたて投資枠")
-    if "成長投資枠" in text:
+    if fund_supports_nisa_frame(text, "成長投資枠"):
         types.append("成長投資枠")
     if types:
         return "対象（" + "・".join(types) + "）"
-    return "対象"
+    return "対象外"
 
 
 def parse_numeric_value(text):
@@ -2805,13 +2819,27 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                     score -= 1
 
         # ④ NISA活用意向との照合
+        # ※以前は「希望する枠の対象である場合のみ加点」で、希望しない枠（例：成長投資枠希望なのに
+        #   つみたて投資枠のみ対象）に対する減点が無かったため、NISAの観点では本来ふさわしくない
+        #   ファンドでも、他の項目のスコアだけで上位に選ばれてしまうことがあった。
+        #   加点だけでなく、希望する枠に対応していない場合は明確に減点する対称的な判定に修正。
         nisa_pref = hearing.get("nisa_pref", "")
-        if nisa_pref == "つみたて投資枠を使いたい" and "つみたて投資枠" in text:
-            score += 2
-            reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品であるため合致")
-        elif nisa_pref == "成長投資枠を使いたい" and "成長投資枠" in text:
-            score += 2
-            reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品であるため合致")
+        supports_tsumitate = fund_supports_nisa_frame(text, "つみたて投資枠")
+        supports_growth = fund_supports_nisa_frame(text, "成長投資枠")
+        if nisa_pref == "つみたて投資枠を使いたい":
+            if supports_tsumitate:
+                score += 2
+                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品であるため合致")
+            else:
+                score -= 2
+                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品ではないため減点")
+        elif nisa_pref == "成長投資枠を使いたい":
+            if supports_growth:
+                score += 2
+                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品であるため合致")
+            else:
+                score -= 2
+                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品ではないため減点")
 
         # ⑤ 為替リスク許容度との照合
         # ※以前は「為替変動リスク」「外国」「為替ヘッジなし」という完全一致のみで判定していたため、
