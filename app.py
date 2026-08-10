@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r32（NISA意向をハードフィルター化、解説ターゲット表示に全ヒアリング項目を反映）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r33（NISA判定が「6 租税の概要」見出しの文言を誤検知していた根本原因を修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2401,15 +2401,21 @@ def compute_effective_cost(purchase_fee_text, trust_fee_text):
 def fund_supports_nisa_frame(text, frame_label):
     """指定したNISA区分（『成長投資枠』または『つみたて投資枠』）に、ファンドが実際に
     対象となっているかどうかを判定する。
-    ※単純に frame_label という文字列が本文に含まれているかどうかだけで判定すると、
-    「NISA成長投資枠およびNISAつみたて投資枠の対象商品ではありません。」のような
-    否定文にも frame_label の文字列自体は含まれてしまうため、対象外のファンドを
-    誤って『対象』と判定してしまう不具合があった。「ではありません」等の否定表現が
-    同じ文（句点まで）に続く場合は、対象外として正しく判定する。"""
-    if not text or frame_label not in text:
+    ※単純に frame_label という文字列が本文のどこかに含まれているかだけで判定すると、
+    見出し「6 租税の概要(NISA成長投資枠、NISAつみたて投資枠、iDeCoの対象か否かもご確認ください)」
+    のような、実際の対象有無とは関係のない定型の説明文にも frame_label の文字列が含まれてしまうため、
+    NISAつみたて投資枠のみが対象のファンドまで『成長投資枠の対象』と誤判定してしまう不具合があった。
+    実際の対象有無を示す「●…の対象商品です／ではありません」という記載（実際の判定文）のみを
+    抽出して判定することで、見出し等の定型文言による誤検知を避ける。"""
+    if not text:
+        return False
+    # 実際にNISA対象有無を明言している行（「●」で始まり「の対象商品です／ではありません」等で終わる文）のみを抽出する
+    eligibility_lines = re.findall(r"●[^\n]*?(?:の対象商品です|の対象商品ではありません|の対象商品ではございません)[^\n]*", text)
+    judged_text = "\n".join(eligibility_lines)
+    if frame_label not in judged_text:
         return False
     negative_pattern = re.compile(re.escape(frame_label) + r"[^。]*(?:ではありません|ではございません|の対象ではありません)")
-    if negative_pattern.search(text):
+    if negative_pattern.search(judged_text):
         return False
     return True
 
