@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r34（コスト「特にこだわらない」選択時の矛盾した加点・表示を撤廃）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r36（絞り込みロジック大幅拡充：実績ブレ幅ベースのリスク判定・資産集中度・投資目的全パターン・運用期間×流動性・投資経験×想定購入層・保有資産分散を追加、STEP1にロジック一覧を表示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2398,6 +2398,65 @@ def compute_effective_cost(purchase_fee_text, trust_fee_text):
         return "記載なし（抽出スキップ）"
 
 
+# --- 🎯 資産集中度合いの判定（保有資産に対して今回の投資予定額が大きい場合はリスクを抑える） ---
+ASSET_SCALE_REPR = {
+    "500万円未満": 250, "500万円〜2,000万円": 1250,
+    "2,000万円〜5,000万円": 3500, "5,000万円以上": 7000,
+}
+INVESTMENT_AMOUNT_REPR = {
+    "50万円未満": 25, "50万円〜200万円": 125, "200万円〜500万円": 350,
+    "500万円〜1,000万円": 750, "1,000万円以上": 1500,
+}
+
+
+def assess_concentration_risk(asset_scale, investment_amount):
+    """保有金融資産の規模に対し、今回の投資予定額がどの程度の割合を占めるかを概算し、
+    集中リスクの水準を判定する。いずれかが『回答しない』の場合は判定不能として None を返す。
+    戻り値：("high"|"low"|None, 割合(float)|None)"""
+    asset_repr = ASSET_SCALE_REPR.get(asset_scale)
+    invest_repr = INVESTMENT_AMOUNT_REPR.get(investment_amount)
+    if asset_repr is None or invest_repr is None:
+        return None, None
+    ratio = invest_repr / asset_repr
+    if ratio >= 0.5:
+        return "high", ratio
+    elif ratio >= 0.3:
+        return "medium", ratio
+    return "low", ratio
+
+
+def extract_5yr_volatility_spread(text):
+    """『平均◯% 最低△%(時期) 最高☓%(時期)』という記載から、過去5年の最高−最低の値ブレ幅を算出する。
+    抽出できない場合はNoneを返す。"""
+    m = re.search(r"最低\s*([-+]?\d+\.?\d*)\s*[%％].*?最高\s*([-+]?\d+\.?\d*)\s*[%％]", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return round(float(m.group(2)) - float(m.group(1)), 1)
+    except ValueError:
+        return None
+
+
+# 換金・解約条件に「流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）」があるかどうかの判定キーワード
+LIQUIDITY_RESTRICTION_KEYWORDS = [
+    "低流動性資産", "四半期ごと", "受付時間制限", "大口換金には制限", "大口の換金には制限",
+    "大口換金申込みには制限", "解約に制限があります", "純解約申込額", "換金申込期限は毎月末営業日",
+]
+
+# 想定購入層に「投資経験者を前提とする」旨の記載があるかどうかの判定キーワード
+EXPERIENCED_INVESTOR_KEYWORDS = [
+    "知識や投資経験があり", "商品性をご理解いただける投資家", "十分な知識や投資経験があり",
+]
+
+
+def has_liquidity_restriction(text):
+    return any(k in text for k in LIQUIDITY_RESTRICTION_KEYWORDS)
+
+
+def assumes_experienced_investor(text):
+    return any(k in text for k in EXPERIENCED_INVESTOR_KEYWORDS)
+
+
 def fund_supports_nisa_frame(text, frame_label):
     """指定したNISA区分（『成長投資枠』または『つみたて投資枠』）に、ファンドが実際に
     対象となっているかどうかを判定する。
@@ -2726,13 +2785,21 @@ def build_selection_policy(hearing):
     cost_pref = hearing.get("cost_pref", "特にこだわらない")
     nisa_pref = hearing.get("nisa_pref", "特にこだわらない")
     fx_pref = hearing.get("fx_tolerance", "特にこだわらない")
+    horizon = hearing.get("horizon", "特にこだわらない")
+    experience = hearing.get("experience", "")
+    existing_assets = hearing.get("existing_assets", [])
     avoid_tags = hearing.get("avoid_tags", [])
     free_text = hearing.get("free_text", "").strip()
 
     purpose_guidance = PURPOSE_FUND_GUIDANCE.get(purpose, "")
 
+    concentration_level, concentration_ratio = assess_concentration_risk(
+        hearing.get("asset_scale", "回答しない"), hearing.get("investment_amount", "回答しない")
+    )
+
     # 優先順位は、score_and_narrow_funds() 内の実際の加減点の大きさに対応させている
-    # （除外意向 > コスト > リスク許容度 > コア・サテライト > 投資目的 > NISA > 為替 > 自由記述の肯定的関心事）。
+    # （除外意向 > コスト > リスク許容度 > コア・サテライト > 投資目的 > 運用期間×流動性 >
+    #   投資経験 > NISA > 為替 > 保有資産の分散 > 自由記述の肯定的関心事）。
     priority_list = []
     free_text_items = analyze_free_text_sentiment(free_text)
     has_negative_free_text = any(item["sentiment"] == "negative" for item in free_text_items)
@@ -2745,15 +2812,24 @@ def build_selection_policy(hearing):
         priority_list.append(f"お客様が除外を希望された条件（{'／'.join(detail)}）")
     if cost_pref != "特にこだわらない":
         priority_list.append(f"コストに関する考え方：「{cost_pref}」")
-    priority_list.append(f"リスク許容度：「{tolerance_raw}」")
+    tolerance_label = f"リスク許容度：「{tolerance_raw}」"
+    if concentration_level in ("high", "medium"):
+        tolerance_label += "（保有資産に対する投資予定額の割合が大きいため、より保守的に判定）"
+    priority_list.append(tolerance_label)
     if core_satellite_pref != "特にこだわらない":
         priority_list.append(f"コア・サテライト運用の考え方：「{core_satellite_pref}」")
     if purpose:
         priority_list.append(f"投資目的：「{purpose}」")
+    if horizon == "3年未満（短期）":
+        priority_list.append(f"想定運用期間「{horizon}」と換金・解約条件（流動性制限）との整合性")
+    if "初心者" in experience:
+        priority_list.append(f"投資経験「{experience}」と想定購入層との照合")
     if nisa_pref != "特にこだわらない":
         priority_list.append(f"NISA活用の意向：「{nisa_pref}」")
     if fx_pref != "特にこだわらない":
         priority_list.append(f"為替リスクの許容度：「{fx_pref}」")
+    if existing_assets:
+        priority_list.append("保有金融資産との分散（重複回避）")
     if any(item["sentiment"] == "positive" for item in free_text_items):
         priority_list.append("自由記述で示された肯定的な関心事")
 
@@ -2798,22 +2874,59 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         trust_pct = float(trust_match.group(1)) if trust_match else None
 
         # ② リスク許容度との照合
-        risk_hits = sum(1 for k in RISKY_KEYWORDS if k in text)
+        # ※以前はリスクキーワードの「個数」で判定していたが、これは実際の値動きの大きさと必ずしも
+        #   一致しない（例：REITは為替・信用・カントリー等の記載項目数は多いが、値動き自体は他の
+        #   資産と大差ない場合もある）。すでに散布図等で使用している「過去5年の最高－最低の値ブレ幅
+        #   （実績データ）」を主指標とし、リスクキーワードは実績データが無い場合の補助情報として扱う。
+        # ※さらに、保有資産に対して今回の投資予定額の割合が大きい場合（資産の集中）は、
+        #   申告いただいたリスク許容度をそのまま使うのではなく、一段階保守的に判定する。
         tol = hearing.get("tolerance_level", "普通")
-        if tol == "低い":
-            if risk_hits == 0:
-                score += 3
-                reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、新興国・レバレッジ型などの値動きの大きい資産を含まないため合致")
-            else:
-                score -= 3 * risk_hits
-        elif tol == "高い":
-            if risk_hits >= 1:
-                score += 2
-                reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、積極的な運用を志向する値動きの大きい資産を含むため合致")
-        else:  # 普通
-            if risk_hits <= 1:
-                score += 1
-                reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、過度に値動きの大きい資産（新興国・レバレッジ型等）を含まない標準的なリスク水準のため合致")
+        risk_hits = sum(1 for k in RISKY_KEYWORDS if k in text)
+        volatility_spread = extract_5yr_volatility_spread(text)
+
+        concentration_level, concentration_ratio = assess_concentration_risk(
+            hearing.get("asset_scale", "回答しない"), hearing.get("investment_amount", "回答しない")
+        )
+        effective_tol = tol
+        concentration_note = ""
+        if concentration_level == "high" and tol != "低い":
+            effective_tol = "低い" if tol == "普通" else "普通"
+            concentration_note = "（保有資産に対して今回の投資予定額の割合が大きいため、リスク許容度を一段階保守的に判定しています）"
+        elif concentration_level == "medium" and tol == "高い":
+            effective_tol = "普通"
+            concentration_note = "（保有資産に対して今回の投資予定額の割合がやや大きいため、リスク許容度をやや保守的に判定しています）"
+
+        if volatility_spread is not None:
+            if effective_tol == "低い":
+                if volatility_spread <= 25:
+                    score += 3
+                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと小さいため合致")
+                elif volatility_spread >= 50:
+                    score -= 3
+                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きいため減点")
+            elif effective_tol == "高い":
+                if volatility_spread >= 35:
+                    score += 2
+                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、積極的な運用ニーズに合致")
+            else:  # 普通
+                if volatility_spread <= 40:
+                    score += 1
+                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと標準的な範囲であるため合致")
+                elif volatility_spread >= 60:
+                    score -= 2
+                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きいため減点")
+        else:
+            # 実績データが抽出できない場合（設定間もないファンド等）は、リスクキーワードの有無で補助的に判定する
+            if effective_tol == "低い":
+                if risk_hits == 0:
+                    score += 2
+                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、新興国・レバレッジ型などの値動きの大きい資産を含まないため合致（過去の実績データが少ないため参考情報として判定）")
+                else:
+                    score -= 2 * risk_hits
+            elif effective_tol == "高い":
+                if risk_hits >= 1:
+                    score += 1
+                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、積極的な運用を志向する値動きの大きい資産を含むため合致（過去の実績データが少ないため参考情報として判定）")
 
         # ③ コストに関する考え方との照合
         # お客様の「コストに関する考え方」の回答に応じて、信託報酬の高低に対する重み付けを変える。
@@ -2841,6 +2954,41 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 #   お客様が明示的に「特にこだわらない」を選んでいるにもかかわらず、
                 #   あたかもコスト面のご要望があったかのような矛盾した表示になっていたため撤廃した。
                 pass
+
+        # ③.5 想定運用期間を考慮したコスト評価
+        # ※信託報酬（年率コスト）は「保有期間に比例して累積する」性質のコストであるため、
+        #   短期保有では信託報酬の差が及ぼす影響はごく小さく、むしろ保有期間によらず一度きり発生する
+        #   購入時手数料の方が実質的な負担として大きい。これまでは運用期間を考慮せず一律に信託報酬の
+        #   高低だけでコストを評価していたため、短期運用が目的のお客様に対しても「信託報酬が高いので
+        #   減点」といった、実態に即さない解説・判定になってしまう問題があった。
+        horizon = hearing.get("horizon", "特にこだわらない")
+        if cost_pref != "コストよりも運用内容・リターンを重視したい":
+            # 「購入時に支払う費用」の見出しから、次の見出し（継続的/継続時に支払う費用）までの区間だけを
+            # 抽出して判定することで、他のセクションの「かかりません」等の記載を誤って拾わないようにする。
+            purchase_start = text.find("購入時に支払う費用")
+            purchase_pct = None
+            if purchase_start != -1:
+                next_heading_candidates = [
+                    text.find("継続的に支払う費用", purchase_start),
+                    text.find("継続時に支払う費用", purchase_start),
+                ]
+                next_heading_candidates = [i for i in next_heading_candidates if i != -1]
+                purchase_end = min(next_heading_candidates) if next_heading_candidates else purchase_start + 300
+                purchase_segment = text[purchase_start:purchase_end]
+                purchase_pct = extract_first_percent(purchase_segment)
+
+            if horizon == "3年未満（短期）":
+                if purchase_pct is not None:
+                    if purchase_pct == 0:
+                        score += 2
+                        reasons.append(f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、保有期間が短く信託報酬の差が累積しにくいため、それよりも一度きり発生する購入時手数料が無料である点の方が実質的な負担軽減として重要です")
+                    elif purchase_pct >= 2.0:
+                        score -= 2
+                        reasons.append(f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、短期間の保有にもかかわらず購入時手数料が{purchase_pct:g}%と高いため、信託報酬の高低以上に実質的な負担が大きくなる可能性がある点にご留意ください")
+            elif horizon == "10年超（長期）":
+                if trust_pct is not None and trust_pct < 0.3:
+                    score += 1.5
+                    reasons.append(f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」のように長期間保有される場合、信託報酬のわずかな差でも複利で大きな差になるため、年率{trust_pct:g}%という低水準の信託報酬は特に有利に働きます")
 
         # ④ NISA活用意向との照合
         # ※以前は「希望する枠の対象である場合のみ加点」で、希望しない枠（例：成長投資枠希望なのに
@@ -2880,12 +3028,73 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 score -= 2
                 reasons.append(f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替変動リスクの記載がある商品のため減点（このファンドは為替の影響を受ける可能性がある点にご注意ください）")
 
-        # ⑥ 投資目的との照合（インカムゲイン重視の場合、毎月決算型・分配重視型を優先）
+        # ⑥ 投資目的との照合（目的ごとに、目的・機能／換金解約条件／実績リスクを踏まえて判定）
         purpose = hearing.get("purpose", "")
-        if "インカムゲイン" in purpose or "分配" in purpose:
+        if "インカムゲイン" in purpose or "分配重視" in purpose:
             if any(k in text for k in ["毎月決算", "毎月分配", "分配重視"]):
                 score += 3
                 reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、毎月決算型・分配重視型の商品であるため合致")
+        elif "ライフイベント資金" in purpose:
+            if has_liquidity_restriction(text):
+                score -= 3
+                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、換金・解約に一定の制限がある商品であるため、資金が必要な時期に自由に引き出せない可能性がある点で減点")
+            if volatility_spread is not None:
+                if volatility_spread <= 25:
+                    score += 2
+                    reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと小さく、使う時期が決まった資金に適した安定性があるため合致")
+                elif volatility_spread >= 50:
+                    score -= 2
+                    reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、使う時期が決まった資金には値動きが大きすぎる可能性がある点で減点")
+        elif "老後資金" in purpose:
+            if any(k in text for k in ["毎月決算", "毎月分配", "分配重視"]):
+                score += 2
+                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、分配を伴う商品であり、取り崩しながらの運用に適しているため合致")
+            if volatility_spread is not None and volatility_spread >= 50:
+                score -= 2
+                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、安定運用を志向する目的にはそぐわない可能性がある点で減点")
+        elif "インフレ" in purpose or "資産防衛" in purpose:
+            if any(k in text for k in ["物価連動国債", "REIT", "コモディティ", "オルタナティブ", "不動産投資信託証券"]):
+                score += 3
+                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、インフレ局面や株式市場下落時に異なる値動きが期待される実物資産・オルタナティブ資産等を含む商品であるため合致")
+        elif "長期的な資産形成" in purpose:
+            if any(k in text for k in ["連動", "インデックス"]):
+                score += 1
+                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、指数に連動するインデックス型の商品であり、長期の資産形成に適した透明性・低コスト性を備えているため合致")
+
+        # ⑥.6 想定運用期間と換金・解約条件（流動性制限）との整合性
+        # ※想定運用期間が短いお客様に対し、大口換金の制限や低流動性資産への投資など、
+        #   換金・解約に一定の制約がある商品を提案するのは、実務上のミスマッチにつながるため。
+        if horizon == "3年未満（短期）" and has_liquidity_restriction(text):
+            score -= 3
+            reasons.append(f"【運用期間との整合性】お客様の想定運用期間「{horizon}」に対し、大口換金の制限や低流動性資産への投資など、換金・解約に一定の制約がある商品であるため、短期での資金化が必要な場合は不向きな可能性がある点で減点")
+
+        # ⑥.7 投資経験と想定購入層との照合
+        # ※重要情報シートの「商品組成に携わる事業者が想定する購入層」欄に、投資経験者を前提とする
+        #   記載がある商品（非上場株式・低流動性資産等）を、投資初心者の方に提案するのは適切でないため。
+        experience = hearing.get("experience", "")
+        if "初心者" in experience and assumes_experienced_investor(text):
+            score -= 2
+            reasons.append(f"【投資経験】お客様のご回答「{experience}」に対し、商品組成会社が『投資経験がある方』を主な想定購入層としている商品であるため、初心者の方にはやや高度な内容を含む可能性がある点で減点")
+
+        # ⑥.8 保有資産の分散（すでに保有している資産クラスへの過度な偏りを避ける）
+        existing_assets_for_diversification = hearing.get("existing_assets", [])
+        if existing_assets_for_diversification:
+            fund_category_for_diversification = classify_fund_type(text, fund_name=name)
+            diversification_map = {
+                "国内株式": ["国内株式型"],
+                "外国株式": ["米国株式型", "先進国株式型", "全世界株式型", "新興国株式型", "インド株式型"],
+                "債券": ["債券型"],
+            }
+            for asset_label, cats in diversification_map.items():
+                if asset_label in existing_assets_for_diversification and fund_category_for_diversification in cats:
+                    score -= 1
+                    reasons.append(f"【保有資産の分散】お客様はすでに「{asset_label}」を保有されているため、同じ資産クラス（{fund_category_for_diversification}）に偏らないよう、やや減点して評価しています")
+                    break
+
+        # ⑥.9 年齢層と換金条件との整合性（スコアには反映せず、担当者への注意喚起のみ）
+        age_range_val = hearing.get("age_range", "")
+        if "75歳以上" in age_range_val and has_liquidity_restriction(text):
+            reasons.append("【ご年齢とのご留意事項】ご高齢のお客様向けに、このファンドの換金・解約条件（大口換金の制限等）についても、資産の流動性確保の観点から改めてご確認いただくことをおすすめします（この項目はスコアには反映していません）")
 
         # ⑥.5 コア・サテライト運用の考え方との照合
         # 定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。それ以外はコア資産。
@@ -3056,7 +3265,71 @@ def show_login_screen():
 # STEP 1 : 管理画面コンテンツ (手動でのPDF追加登録 & 鍵設定画面)
 def render_admin_content(active_api_key):
     st.markdown("<div class='form-title'>⚙️ STEP 1 : PDF追加登録 ＆ 鍵設定</div>", unsafe_allow_html=True)
-    
+
+    # --- 📖 ファンド絞り込みロジックの一覧（現在の実装内容） ---
+    with st.expander("📖 ファンド絞り込みロジックの一覧（現在の実装内容を確認する）", expanded=False):
+        st.markdown("""
+すべてAIの自由生成ではなく、コード側の決定的なルールに基づき判定しています（自由記述欄の意味解釈のみAIを併用）。
+
+#### ① リスク許容度
+- **見る項目**：「〔参考〕過去5年間の収益率」の最低・最高値（実績の値ブレ幅）。実績データが無い商品は「リスクの内容」欄のキーワード数で補助的に判定。
+- **判定**：「低い」→ブレ幅25pt以下で加点／50pt以上で減点。「高い」→35pt以上で加点。「普通」→40pt以下で加点／60pt以上で減点。
+- **資産集中度の調整**：保有金融資産に対して今回の投資予定額の割合が大きい場合、申告いただいたリスク許容度よりも一段階保守的に判定します。
+
+#### ② コストに関する考え方
+- **見る項目**：「継続的に支払う費用」の信託報酬率、「購入時に支払う費用」の購入時手数料率。
+- **判定**：ご選択（低コスト重視／バランス／リターン重視／特にこだわらない）に応じて信託報酬への重み付けを変更。「特にこだわらない」の場合は加減点なし。
+- **運用期間の考慮**：短期（3年未満）は購入時手数料（一時的コスト）を重視、長期（10年超）は信託報酬（累積コスト）を重視。
+
+#### ③ NISA活用意向
+- **見る項目**：「租税の概要」欄の「●…の対象商品です／ではありません」という判定文（見出し文言そのものは除外）。
+- **判定**：希望する枠（つみたて／成長投資枠）に対応していない商品は、原則として候補から除外するハードフィルター。
+
+#### ④ 為替リスク許容度
+- **見る項目**：本文全体における「為替」という語の有無。
+- **判定**：「避けたい」を選択時、「為替」の記載が無ければ加点、あれば減点。
+
+#### ⑤ 投資目的
+- **見る項目**：「金融商品の目的・機能」「換金・解約の条件」「過去5年間の収益率」。
+- **判定**：目的ごとに異なる観点で判定します。
+  - 長期的な資産形成：インデックス・連動型なら加点
+  - ライフイベント資金：換金・解約に制限がある商品は減点／値ブレ幅が小さい商品は加点
+  - 老後資金：分配型は加点／値ブレ幅が大きい商品は減点
+  - インカムゲイン重視：毎月決算・分配重視型は加点
+  - インフレ・資産防衛：物価連動国債・REIT・オルタナティブ等は加点
+
+#### ⑥ コア・サテライト運用の考え方
+- **見る項目**：ファンド分類（投資対象の分類）を土台に、テーマ型・新興国・REIT・ハイイールド債・オルタナティブ等を「サテライト資産」、それ以外を「コア資産」と分類。
+- **判定**：ご希望に応じて該当区分を加点、コア中心のご希望時はサテライト資産を減点。
+
+#### ⑦ 想定運用期間 × 換金・解約条件
+- **見る項目**：「換金・解約の条件」欄の流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）の記載有無。
+- **判定**：想定運用期間が短期（3年未満）の場合、流動性制限がある商品は減点。
+
+#### ⑧ 投資経験 × 想定購入層
+- **見る項目**：「商品組成に携わる事業者が想定する購入層」欄の、投資経験者を前提とする記載の有無。
+- **判定**：投資経験「初心者」の回答に対し、経験者を想定した記載がある商品は減点。
+
+#### ⑨ 保有金融資産（分散の観点）
+- **見る項目**：ファンド分類（投資対象の分類）。
+- **判定**：すでに保有している資産クラス（国内株式・外国株式・債券）と同じ分類のファンドは、分散を促す観点でやや減点。
+
+#### ⑩ ご年齢とのご留意事項
+- **見る項目**：「換金・解約の条件」欄の流動性制限。
+- **判定**：75歳以上のお客様に流動性制限のある商品が候補に入った場合、スコアには反映せず注意喚起のみ表示。
+
+#### ⑪ 除外したい条件
+- **見る項目**：本文全体でのキーワード（新興国・レバレッジ・ハイイールド・テクノロジー・脱炭素）の有無。
+- **判定**：該当する場合は大幅減点。
+
+#### ⑫ 自由記述欄
+- **見る項目**：自由記述の全文。
+- **判定**：AI（Gemini）が文脈からトピックと肯定的／否定的なニュアンスを判定。「保有している」等の記述は否定的（除外）として扱う。AIが利用できない場合は簡易なキーワード判定にフォールバック。
+
+---
+※ファンド分類（コア／サテライトの土台）は、「全世界株式型」「米国株式型」「先進国株式型」「インド株式型」「新興国株式型」「国内株式型」「テーマ型株式（脱炭素・テクノロジー等）」「不動産投資型（REIT）」「バランス型（複合資産）」「債券型」のいずれかに、ファンド名・本文のキーワードから判定しています。
+        """)
+
     # 1. APIキー設定
     with st.container(border=True):
         st.markdown("<h4 style='font-size: 24px; margin-bottom: 15px;'>🔑 API KEY 設定</h4>", unsafe_allow_html=True)
@@ -3288,6 +3561,13 @@ def render_selection_content(active_api_key):
             index=4,
             key="result_asset_scale"
         )
+        investment_amount = st.selectbox(
+            "今回の投資予定額の目安：",
+            options=["50万円未満", "50万円〜200万円", "200万円〜500万円", "500万円〜1,000万円", "1,000万円以上", "回答しない"],
+            index=5,
+            key="result_investment_amount"
+        )
+        st.caption("💡 保有金融資産に対して今回の投資予定額の割合が大きい場合、資産が特定の商品に集中するリスクを踏まえ、リスク許容度をやや抑えた候補選定を行います。")
         core_satellite_pref = st.selectbox(
             "コア・サテライト運用の考え方：",
             options=[
@@ -3414,10 +3694,16 @@ def render_selection_content(active_api_key):
             ),
             "tolerance_raw": tolerance,
             "purpose": purpose,
+            "horizon": horizon,
+            "age_range": age_range,
+            "experience": experience,
             "nisa_pref": nisa_pref,
             "fx_tolerance": fx_tolerance,
             "core_satellite_pref": core_satellite_pref,
             "cost_pref": cost_pref,
+            "existing_assets": existing_assets,
+            "asset_scale": asset_scale,
+            "investment_amount": investment_amount,
             "avoid_tags": avoid_tags,
             "free_text": free_text,
         }
@@ -3636,6 +3922,7 @@ def render_result_page():
         cost_val = st.session_state.get("result_cost_pref", "特にこだわらない")
         assets_val = st.session_state.get("result_existing_assets", [])
         scale_val = st.session_state.get("result_asset_scale", "回答しない")
+        invest_amount_val = st.session_state.get("result_investment_amount", "回答しない")
         avoid_val = st.session_state.get("result_avoid_tags", [])
         free_text_val = st.session_state.get("result_free_text", "").strip()
 
@@ -3659,6 +3946,8 @@ def render_result_page():
             summary_items.append(f"保有資産: {'、'.join(assets_val)}")
         if scale_val != "回答しない":
             summary_items.append(f"資産規模: {scale_val}")
+        if invest_amount_val != "回答しない":
+            summary_items.append(f"投資予定額: {invest_amount_val}")
         if avoid_val:
             summary_items.append(f"除外条件: {'、'.join(avoid_val)}")
         if free_text_val:
@@ -3986,6 +4275,12 @@ def render_result_page():
 ・コア資産：上記に該当しない、全世界株式・先進国株式・国内株式インデックスや伝統的な債券等の基本的な資産クラス
 ・お客様が「コア・サテライト運用の考え方」を選択されている場合は、比較対象ファンドがそれぞれコア資産・サテライト資産のどちらに該当するかを明示し、お客様のご希望（安定重視でコア中心か、プラスアルファを狙いサテライトも組み入れるか）との整合性を具体的に解説してください。
 ・断定的な配分比率の推奨（「コア○％・サテライト○％にすべき」等）は避け、あくまで各ファンドの位置づけの説明と、お客様の意向との整合性の解説に留めてください。
+
+【コストの解説における運用期間の考慮（超重要）】
+信託報酬（運用管理費用）は保有期間に比例して累積する「継続的なコスト」であるのに対し、購入時手数料は保有期間によらず一度だけ発生する「一時的なコスト」です。この性質の違いを踏まえずに、想定運用期間を無視して信託報酬の高低だけを強調する解説は、実態に即さない誤解を招くため避けてください。
+・お客様の想定運用期間が「3年未満（短期）」の場合：短期間の保有では信託報酬の差が及ぼす累積的な影響は小さいため、信託報酬の差だけを過度に問題視する書き方は避けてください。むしろ、一度きり発生する購入時手数料の有無・水準の方が、実質的な負担として重要である点を中心に解説してください。
+・お客様の想定運用期間が「10年超（長期）」の場合：長期保有では信託報酬のわずかな差でも複利で大きな差になるため、信託報酬の水準を重視して解説してください。
+・想定運用期間が「3〜10年（中期）」または未設定（特にこだわらない）の場合は、購入時手数料と信託報酬の両方をバランス良く説明してください。
 """
 
         with st.spinner("金融AIアシスタントが重要情報シートを精緻に分析し、詳細解説レポートを自動作成しております。今しばらくお待ちください..."):
