@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r31（NISA区分の否定文誤判定を修正、不一致時の減点を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r32（NISA意向をハードフィルター化、解説ターゲット表示に全ヒアリング項目を反映）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2761,6 +2761,24 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
     それ以外の項目（リスク許容度・コスト方針等）は、引き続きコード側の決定的なルール判定のまま。
     戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
     free_text_items = interpret_free_text_via_ai(hearing.get("free_text", ""), api_key)
+
+    # --- 🌟 NISA活用意向のハードフィルター ---
+    # ※これまでは加点・減点（±2点）のみで判定していたため、他の項目（コスト・自由記述等）の
+    #   スコアが高い場合、希望するNISA区分に対応していないファンドでも選ばれてしまうことがあった。
+    #   「つみたて投資枠を使いたい／成長投資枠を使いたい」という明確なご希望がある場合は、
+    #   対応していないファンドを原則として候補から除外する（該当ファンドが1つも無くなる場合のみ、
+    #   除外せず従来通りの減点判定にフォールバックする）。
+    nisa_pref_for_filter = hearing.get("nisa_pref", "特にこだわらない")
+    if nisa_pref_for_filter in ("つみたて投資枠を使いたい", "成長投資枠を使いたい"):
+        target_frame = "つみたて投資枠" if nisa_pref_for_filter == "つみたて投資枠を使いたい" else "成長投資枠"
+
+        def _fund_text(n):
+            d = uploaded_funds.get(n, {})
+            return d.get("text", "") if isinstance(d, dict) else str(d)
+
+        filtered_fund_list = [n for n in fund_list if fund_supports_nisa_frame(_fund_text(n), target_frame)]
+        if filtered_fund_list:
+            fund_list = filtered_fund_list
 
     results = []
     for name in fund_list:
@@ -3599,17 +3617,52 @@ def render_result_page():
 
     # 選択画面から引き継がれた現在の設定値を上部にサマライズ表示
     target_type = st.session_state.get("result_target_type", "顧客（お客様ご自身への直接説明）向け")
-    
+
     if "顧客" in target_type:
         age_val = st.session_state.get("result_age_range", "30代〜40代")
         exp_val = st.session_state.get("result_experience", "初心者")
         purp_val = st.session_state.get("result_purpose", "長期資産形成")
         tol_val = st.session_state.get("result_tolerance", "普通")
-        summary_text = f"{target_type} （年齢: {age_val} / 投資経験: {exp_val} / 目的: {purp_val} / 許容度: {tol_val}）"
+        horizon_val = st.session_state.get("result_horizon", "特にこだわらない")
+        fx_val = st.session_state.get("result_fx_tolerance", "特にこだわらない")
+        nisa_val = st.session_state.get("result_nisa_pref", "特にこだわらない")
+        core_sat_val = st.session_state.get("result_core_satellite_pref", "特にこだわらない")
+        cost_val = st.session_state.get("result_cost_pref", "特にこだわらない")
+        assets_val = st.session_state.get("result_existing_assets", [])
+        scale_val = st.session_state.get("result_asset_scale", "回答しない")
+        avoid_val = st.session_state.get("result_avoid_tags", [])
+        free_text_val = st.session_state.get("result_free_text", "").strip()
+
+        summary_items = [
+            f"年齢: {age_val}",
+            f"投資経験: {exp_val}",
+            f"目的: {purp_val}",
+            f"リスク許容度: {tol_val}",
+        ]
+        if horizon_val != "特にこだわらない":
+            summary_items.append(f"運用期間: {horizon_val}")
+        if fx_val != "特にこだわらない":
+            summary_items.append(f"為替許容度: {fx_val}")
+        if nisa_val != "特にこだわらない":
+            summary_items.append(f"NISA意向: {nisa_val}")
+        if core_sat_val != "特にこだわらない":
+            summary_items.append(f"コア・サテライト: {core_sat_val}")
+        if cost_val != "特にこだわらない":
+            summary_items.append(f"コスト方針: {cost_val}")
+        if assets_val:
+            summary_items.append(f"保有資産: {'、'.join(assets_val)}")
+        if scale_val != "回答しない":
+            summary_items.append(f"資産規模: {scale_val}")
+        if avoid_val:
+            summary_items.append(f"除外条件: {'、'.join(avoid_val)}")
+        if free_text_val:
+            summary_items.append(f"自由記述: {free_text_val}")
+
+        summary_text = f"{target_type} （" + " / ".join(summary_items) + "）"
     else:
         summary_text = target_type
 
-    st.markdown(f'<div style="background-color: #f0f4f8; border-left: 5px solid #0081c9; padding: 12px 18px; border-radius: 4px; margin-bottom: 20px;"><span style="font-size: 16px; font-weight: bold; color: #0f4c75;">🎯 現在設定されている解説ターゲット：</span><span style="font-size: 16px; color: #1a1a1a;">{summary_text}</span><span style="font-size: 14px; color: #555555; margin-left: 15px;">※設定を切り替えたい場合は、STEP 2の画面へ戻って調整してください。</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="background-color: #f0f4f8; border-left: 5px solid #0081c9; padding: 12px 18px; border-radius: 4px; margin-bottom: 20px;"><span style="font-size: 16px; font-weight: bold; color: #0f4c75;">🎯 現在設定されている解説ターゲット：</span><span style="font-size: 16px; color: #1a1a1a;">{summary_text}</span><br><span style="font-size: 14px; color: #555555;">※設定を切り替えたい場合は、STEP 2の画面へ戻って調整してください。</span></div>', unsafe_allow_html=True)
     
     # --- ■ 比較表示機能 ---
     # 比較表を作成するかどうかは、STEP 2の選択画面（AI比較解説開始ボタンの横）で事前に選択済み
