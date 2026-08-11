@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r36（絞り込みロジック大幅拡充：実績ブレ幅ベースのリスク判定・資産集中度・投資目的全パターン・運用期間×流動性・投資経験×想定購入層・保有資産分散を追加、STEP1にロジック一覧を表示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r37（設問ごとのマッチ度を数値化しSTEP3に表で表示。手動選択時はアンマッチ項目も明示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2774,6 +2774,42 @@ PURPOSE_FUND_GUIDANCE = {
 }
 
 
+def reconstruct_hearing_from_session():
+    """STEP2の各ウィジェットで session_state に保存された回答から、
+    score_and_narrow_funds() が要求する hearing 辞書を再構築する。
+    STEP3（結果画面）で、絞り込みモードを使わなかった場合でも
+    同じ判定ロジックでマッチ度を計算できるようにするためのもの。"""
+    tolerance = st.session_state.get("result_tolerance", "普通（標準的な市場の値動きをバランス良く許容・ミドルリスク）")
+    return {
+        "tolerance_level": (
+            "低い" if ("低い" in tolerance or "非常に低い" in tolerance) else
+            "高い" if ("高い" in tolerance) else "普通"
+        ),
+        "tolerance_raw": tolerance,
+        "purpose": st.session_state.get("result_purpose", ""),
+        "horizon": st.session_state.get("result_horizon", "特にこだわらない"),
+        "age_range": st.session_state.get("result_age_range", ""),
+        "experience": st.session_state.get("result_experience", ""),
+        "nisa_pref": st.session_state.get("result_nisa_pref", "特にこだわらない"),
+        "fx_tolerance": st.session_state.get("result_fx_tolerance", "特にこだわらない"),
+        "core_satellite_pref": st.session_state.get("result_core_satellite_pref", "特にこだわらない"),
+        "cost_pref": st.session_state.get("result_cost_pref", "特にこだわらない"),
+        "existing_assets": st.session_state.get("result_existing_assets", []),
+        "asset_scale": st.session_state.get("result_asset_scale", "回答しない"),
+        "investment_amount": st.session_state.get("result_investment_amount", "回答しない"),
+        "avoid_tags": st.session_state.get("result_avoid_tags", []),
+        "free_text": st.session_state.get("result_free_text", ""),
+    }
+
+
+# STEP3の「設問ごとのマッチ度」表に表示する判定項目の並び順（優先度の高い順）
+MATCH_CRITERION_ORDER = [
+    "除外条件", "自由記述", "コスト", "コスト（運用期間考慮）", "リスク許容度",
+    "コア・サテライト", "投資目的", "運用期間との整合性", "投資経験",
+    "NISA活用意向", "為替リスク許容度", "保有資産の分散", "ご年齢とのご留意事項",
+]
+
+
 def build_selection_policy(hearing):
     """絞り込みボタンを押す前に提示する『選定方針』を、ヒアリング内容から組み立てる。
     ①投資目的に応じてどのような傾向のファンドが適しているかの解説と、
@@ -2836,12 +2872,18 @@ def build_selection_policy(hearing):
     return {"purpose_guidance": purpose_guidance, "priority_list": priority_list}
 
 
-def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=None):
+def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=None, return_all=False):
     """全ファンドの原文テキストと、ヒアリングで得た顧客属性を照合し、
     ルールベースのスコアリングにより候補を上位N件に絞り込む。
     ※自由記述欄の解釈のみ、AI（Gemini）による文章の意味理解を用いる（api_key指定時）。
     それ以外の項目（リスク許容度・コスト方針等）は、引き続きコード側の決定的なルール判定のまま。
-    戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...]}, ...]（スコア降順）"""
+    各判定項目ごとの加減点は "breakdown" にも構造化して記録しており、
+    STEP3の「設問ごとのマッチ度」表の生成に使用する。
+    return_all=True の場合、fund_list に含まれる全ファンドを（絶対順位を絞り込まずに）評価して返す
+    （手動選択モードで選んだファンドの適合度を確認する用途）。
+    戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...],
+              "breakdown": [{"criterion":str, "delta":float, "match":"match"|"mismatch"|"neutral", "detail":str}, ...]}, ...]
+             （スコア降順。return_all=Trueの場合は fund_list の順序を保持）"""
     free_text_items = interpret_free_text_via_ai(hearing.get("free_text", ""), api_key)
 
     # --- 🌟 NISA活用意向のハードフィルター ---
@@ -2850,8 +2892,9 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
     #   「つみたて投資枠を使いたい／成長投資枠を使いたい」という明確なご希望がある場合は、
     #   対応していないファンドを原則として候補から除外する（該当ファンドが1つも無くなる場合のみ、
     #   除外せず従来通りの減点判定にフォールバックする）。
+    # ※ return_all=True（手動選択モードでの適合度確認）の場合は、候補を除外せず全件評価する。
     nisa_pref_for_filter = hearing.get("nisa_pref", "特にこだわらない")
-    if nisa_pref_for_filter in ("つみたて投資枠を使いたい", "成長投資枠を使いたい"):
+    if not return_all and nisa_pref_for_filter in ("つみたて投資枠を使いたい", "成長投資枠を使いたい"):
         target_frame = "つみたて投資枠" if nisa_pref_for_filter == "つみたて投資枠を使いたい" else "成長投資枠"
 
         def _fund_text(n):
@@ -2868,6 +2911,19 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         text = data.get("text", "") if isinstance(data, dict) else str(data)
         score = 0
         reasons = []
+        breakdown = []
+
+        def _apply(criterion, delta, sentence=None):
+            nonlocal score
+            score += delta
+            if sentence:
+                reasons.append(sentence)
+            breakdown.append({
+                "criterion": criterion,
+                "delta": round(delta, 1),
+                "match": "match" if delta > 0 else ("mismatch" if delta < 0 else "neutral"),
+                "detail": sentence or "",
+            })
 
         # ① 信託報酬（コスト）の抽出
         trust_match = re.search(r"信託報酬[^\d]{0,25}(\d+\.?\d*)\s*[%％]", text)
@@ -2899,34 +2955,37 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         if volatility_spread is not None:
             if effective_tol == "低い":
                 if volatility_spread <= 25:
-                    score += 3
-                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと小さいため合致")
+                    _apply("リスク許容度", 3, f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと小さいため合致")
                 elif volatility_spread >= 50:
-                    score -= 3
-                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きいため減点")
+                    _apply("リスク許容度", -3, f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きいため減点")
+                else:
+                    _apply("リスク許容度", 0, f"【リスク許容度】過去5年の値ブレ幅は{volatility_spread}ポイントで、標準的な範囲です")
             elif effective_tol == "高い":
                 if volatility_spread >= 35:
-                    score += 2
-                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、積極的な運用ニーズに合致")
+                    _apply("リスク許容度", 2, f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、積極的な運用ニーズに合致")
+                else:
+                    _apply("リスク許容度", 0, f"【リスク許容度】過去5年の値ブレ幅は{volatility_spread}ポイントで、標準的な範囲です")
             else:  # 普通
                 if volatility_spread <= 40:
-                    score += 1
-                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと標準的な範囲であるため合致")
+                    _apply("リスク許容度", 1, f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと標準的な範囲であるため合致")
                 elif volatility_spread >= 60:
-                    score -= 2
-                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きいため減点")
+                    _apply("リスク許容度", -2, f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きいため減点")
+                else:
+                    _apply("リスク許容度", 0, f"【リスク許容度】過去5年の値ブレ幅は{volatility_spread}ポイントで、やや大きめですが許容範囲内です")
         else:
             # 実績データが抽出できない場合（設定間もないファンド等）は、リスクキーワードの有無で補助的に判定する
             if effective_tol == "低い":
                 if risk_hits == 0:
-                    score += 2
-                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、新興国・レバレッジ型などの値動きの大きい資産を含まないため合致（過去の実績データが少ないため参考情報として判定）")
+                    _apply("リスク許容度", 2, f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」{concentration_note}に対し、新興国・レバレッジ型などの値動きの大きい資産を含まないため合致（過去の実績データが少ないため参考情報として判定）")
                 else:
-                    score -= 2 * risk_hits
+                    _apply("リスク許容度", -2 * risk_hits, f"【リスク許容度】新興国・レバレッジ型等の値動きの大きい資産を{risk_hits}項目含むため、過去の実績データが少ない中の参考情報として減点")
             elif effective_tol == "高い":
                 if risk_hits >= 1:
-                    score += 1
-                    reasons.append(f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、積極的な運用を志向する値動きの大きい資産を含むため合致（過去の実績データが少ないため参考情報として判定）")
+                    _apply("リスク許容度", 1, f"【リスク許容度】お客様のご回答「{hearing.get('tolerance_raw', tol)}」に対し、積極的な運用を志向する値動きの大きい資産を含むため合致（過去の実績データが少ないため参考情報として判定）")
+                else:
+                    _apply("リスク許容度", 0, "【リスク許容度】過去の実績データが少なく、参考情報として判定材料が限定的です")
+            else:
+                _apply("リスク許容度", 0, "【リスク許容度】過去の実績データが少なく、参考情報として判定材料が限定的です")
 
         # ③ コストに関する考え方との照合
         # お客様の「コストに関する考え方」の回答に応じて、信託報酬の高低に対する重み付けを変える。
@@ -2934,20 +2993,21 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         if trust_pct is not None:
             if cost_pref == "コストを最優先に抑えたい（低コスト重視）":
                 if trust_pct < 0.5:
-                    score += 4
-                    reasons.append(f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と低水準であるため合致")
+                    _apply("コスト", 4, f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と低水準であるため合致")
                 elif trust_pct > 1.0:
-                    score -= 3
-                    reasons.append(f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と比較的高水準であるため減点")
+                    _apply("コスト", -3, f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と比較的高水準であるため減点")
+                else:
+                    _apply("コスト", 0, f"【コスト】信託報酬は年率{trust_pct:g}%で標準的な水準です")
             elif cost_pref == "コストと運用内容のバランスを重視したい":
                 if trust_pct < 0.5:
-                    score += 2
-                    reasons.append(f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と低水準であるため合致")
+                    _apply("コスト", 2, f"【コスト】お客様のご希望「{cost_pref}」に対し、信託報酬が年率{trust_pct:g}%と低水準であるため合致")
                 elif trust_pct > 1.5:
-                    score -= 1
+                    _apply("コスト", -1, f"【コスト】信託報酬が年率{trust_pct:g}%とやや高水準です")
+                else:
+                    _apply("コスト", 0, f"【コスト】信託報酬は年率{trust_pct:g}%で標準的な水準です")
             elif cost_pref == "コストよりも運用内容・リターンを重視したい":
                 # コストの高低による加減点は行わない（運用内容・リターンを優先するご意向のため）
-                pass
+                _apply("コスト", 0, "【コスト】コストよりも運用内容・リターンを重視するご意向のため、加減点は行っていません")
             else:
                 # 「特にこだわらない」を選択された場合は、コストに関する加減点・理由表示を一切行わない。
                 # ※以前はここでも軽い低コスト優遇を行い「コストを抑えたいニーズに合致」と表示していたが、
@@ -2980,15 +3040,12 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
             if horizon == "3年未満（短期）":
                 if purchase_pct is not None:
                     if purchase_pct == 0:
-                        score += 2
-                        reasons.append(f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、保有期間が短く信託報酬の差が累積しにくいため、それよりも一度きり発生する購入時手数料が無料である点の方が実質的な負担軽減として重要です")
+                        _apply("コスト（運用期間考慮）", 2, f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、保有期間が短く信託報酬の差が累積しにくいため、それよりも一度きり発生する購入時手数料が無料である点の方が実質的な負担軽減として重要です")
                     elif purchase_pct >= 2.0:
-                        score -= 2
-                        reasons.append(f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、短期間の保有にもかかわらず購入時手数料が{purchase_pct:g}%と高いため、信託報酬の高低以上に実質的な負担が大きくなる可能性がある点にご留意ください")
+                        _apply("コスト（運用期間考慮）", -2, f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、短期間の保有にもかかわらず購入時手数料が{purchase_pct:g}%と高いため、信託報酬の高低以上に実質的な負担が大きくなる可能性がある点にご留意ください")
             elif horizon == "10年超（長期）":
                 if trust_pct is not None and trust_pct < 0.3:
-                    score += 1.5
-                    reasons.append(f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」のように長期間保有される場合、信託報酬のわずかな差でも複利で大きな差になるため、年率{trust_pct:g}%という低水準の信託報酬は特に有利に働きます")
+                    _apply("コスト（運用期間考慮）", 1.5, f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」のように長期間保有される場合、信託報酬のわずかな差でも複利で大きな差になるため、年率{trust_pct:g}%という低水準の信託報酬は特に有利に働きます")
 
         # ④ NISA活用意向との照合
         # ※以前は「希望する枠の対象である場合のみ加点」で、希望しない枠（例：成長投資枠希望なのに
@@ -3000,18 +3057,14 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         supports_growth = fund_supports_nisa_frame(text, "成長投資枠")
         if nisa_pref == "つみたて投資枠を使いたい":
             if supports_tsumitate:
-                score += 2
-                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品であるため合致")
+                _apply("NISA活用意向", 2, f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品であるため合致")
             else:
-                score -= 2
-                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品ではないため減点")
+                _apply("NISA活用意向", -2, f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISAつみたて投資枠の対象商品ではないため減点")
         elif nisa_pref == "成長投資枠を使いたい":
             if supports_growth:
-                score += 2
-                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品であるため合致")
+                _apply("NISA活用意向", 2, f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品であるため合致")
             else:
-                score -= 2
-                reasons.append(f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品ではないため減点")
+                _apply("NISA活用意向", -2, f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品ではないため減点")
 
         # ⑤ 為替リスク許容度との照合
         # ※以前は「為替変動リスク」「外国」「為替ヘッジなし」という完全一致のみで判定していたため、
@@ -3022,59 +3075,76 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         has_fx_exposure = "為替" in text
         if fx_pref == "為替リスクは避けたい（国内資産中心）":
             if not has_fx_exposure:
-                score += 2
-                reasons.append(f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替に関する記載がない国内資産中心の商品であるため合致")
+                _apply("為替リスク許容度", 2, f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替に関する記載がない国内資産中心の商品であるため合致")
             else:
-                score -= 2
-                reasons.append(f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替変動リスクの記載がある商品のため減点（このファンドは為替の影響を受ける可能性がある点にご注意ください）")
+                _apply("為替リスク許容度", -2, f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替変動リスクの記載がある商品のため減点（このファンドは為替の影響を受ける可能性がある点にご注意ください）")
 
         # ⑥ 投資目的との照合（目的ごとに、目的・機能／換金解約条件／実績リスクを踏まえて判定）
         purpose = hearing.get("purpose", "")
         if "インカムゲイン" in purpose or "分配重視" in purpose:
             if any(k in text for k in ["毎月決算", "毎月分配", "分配重視"]):
-                score += 3
-                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、毎月決算型・分配重視型の商品であるため合致")
+                _apply("投資目的", 3, f"【投資目的】お客様のご希望「{purpose}」に対し、毎月決算型・分配重視型の商品であるため合致")
+            else:
+                _apply("投資目的", 0, "【投資目的】毎月決算・分配重視型ではありません")
         elif "ライフイベント資金" in purpose:
             if has_liquidity_restriction(text):
-                score -= 3
-                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、換金・解約に一定の制限がある商品であるため、資金が必要な時期に自由に引き出せない可能性がある点で減点")
+                _apply("投資目的", -3, f"【投資目的】お客様のご希望「{purpose}」に対し、換金・解約に一定の制限がある商品であるため、資金が必要な時期に自由に引き出せない可能性がある点で減点")
             if volatility_spread is not None:
                 if volatility_spread <= 25:
-                    score += 2
-                    reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと小さく、使う時期が決まった資金に適した安定性があるため合致")
+                    _apply("投資目的", 2, f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと小さく、使う時期が決まった資金に適した安定性があるため合致")
                 elif volatility_spread >= 50:
-                    score -= 2
-                    reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、使う時期が決まった資金には値動きが大きすぎる可能性がある点で減点")
+                    _apply("投資目的", -2, f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、使う時期が決まった資金には値動きが大きすぎる可能性がある点で減点")
         elif "老後資金" in purpose:
             if any(k in text for k in ["毎月決算", "毎月分配", "分配重視"]):
-                score += 2
-                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、分配を伴う商品であり、取り崩しながらの運用に適しているため合致")
+                _apply("投資目的", 2, f"【投資目的】お客様のご希望「{purpose}」に対し、分配を伴う商品であり、取り崩しながらの運用に適しているため合致")
             if volatility_spread is not None and volatility_spread >= 50:
-                score -= 2
-                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、安定運用を志向する目的にはそぐわない可能性がある点で減点")
+                _apply("投資目的", -2, f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、安定運用を志向する目的にはそぐわない可能性がある点で減点")
         elif "インフレ" in purpose or "資産防衛" in purpose:
             if any(k in text for k in ["物価連動国債", "REIT", "コモディティ", "オルタナティブ", "不動産投資信託証券"]):
-                score += 3
-                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、インフレ局面や株式市場下落時に異なる値動きが期待される実物資産・オルタナティブ資産等を含む商品であるため合致")
+                _apply("投資目的", 3, f"【投資目的】お客様のご希望「{purpose}」に対し、インフレ局面や株式市場下落時に異なる値動きが期待される実物資産・オルタナティブ資産等を含む商品であるため合致")
+            else:
+                _apply("投資目的", 0, "【投資目的】インフレ・資産防衛に資する実物資産・オルタナティブ資産等の記載はありません")
         elif "長期的な資産形成" in purpose:
             if any(k in text for k in ["連動", "インデックス"]):
-                score += 1
-                reasons.append(f"【投資目的】お客様のご希望「{purpose}」に対し、指数に連動するインデックス型の商品であり、長期の資産形成に適した透明性・低コスト性を備えているため合致")
+                _apply("投資目的", 1, f"【投資目的】お客様のご希望「{purpose}」に対し、指数に連動するインデックス型の商品であり、長期の資産形成に適した透明性・低コスト性を備えているため合致")
+            else:
+                _apply("投資目的", 0, "【投資目的】インデックス型・連動型の記載はありません")
+
+        # ⑥.5 コア・サテライト運用の考え方との照合
+        # 定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。それ以外はコア資産。
+        core_sat_pref = hearing.get("core_satellite_pref", "特にこだわらない")
+        fund_core_sat = classify_core_satellite(text, fund_name=name)
+        if core_sat_pref.startswith("コア資産（"):
+            if fund_core_sat == "コア資産":
+                _apply("コア・サテライト", 3, "【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドは全世界・先進国・国内株式や伝統的債券等の『コア資産』に分類されるため合致")
+            else:
+                _apply("コア・サテライト", -3, "【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドはテーマ型・新興国・REIT・ハイイールド債等の『サテライト資産』に分類されるため減点")
+        elif core_sat_pref.startswith("コア資産をベースに"):
+            _apply("コア・サテライト", 0, f"【コア・サテライト】お客様のご希望「コア資産をベースにサテライト資産も一部取り入れたい」に対し、本ファンドは『{fund_core_sat}』に分類されます（コア・サテライト双方をバランス良く組み合わせる観点でご検討ください）")
+        elif core_sat_pref.startswith("サテライト資産も積極的に"):
+            if fund_core_sat == "サテライト資産":
+                _apply("コア・サテライト", 3, "【コア・サテライト】お客様のご希望「サテライト資産も積極的に組み入れ、プラスアルファのリターンを狙いたい」に対し、本ファンドはテーマ型・新興国・REIT等の『サテライト資産』に分類され、積極的なリターン追求のニーズに合致")
+            else:
+                _apply("コア・サテライト", 0, f"【コア・サテライト】本ファンドは『{fund_core_sat}』に分類されます")
 
         # ⑥.6 想定運用期間と換金・解約条件（流動性制限）との整合性
         # ※想定運用期間が短いお客様に対し、大口換金の制限や低流動性資産への投資など、
         #   換金・解約に一定の制約がある商品を提案するのは、実務上のミスマッチにつながるため。
-        if horizon == "3年未満（短期）" and has_liquidity_restriction(text):
-            score -= 3
-            reasons.append(f"【運用期間との整合性】お客様の想定運用期間「{horizon}」に対し、大口換金の制限や低流動性資産への投資など、換金・解約に一定の制約がある商品であるため、短期での資金化が必要な場合は不向きな可能性がある点で減点")
+        if horizon == "3年未満（短期）":
+            if has_liquidity_restriction(text):
+                _apply("運用期間との整合性", -3, f"【運用期間との整合性】お客様の想定運用期間「{horizon}」に対し、大口換金の制限や低流動性資産への投資など、換金・解約に一定の制約がある商品であるため、短期での資金化が必要な場合は不向きな可能性がある点で減点")
+            else:
+                _apply("運用期間との整合性", 0, "【運用期間との整合性】換金・解約に関する特段の制約は確認されませんでした")
 
         # ⑥.7 投資経験と想定購入層との照合
         # ※重要情報シートの「商品組成に携わる事業者が想定する購入層」欄に、投資経験者を前提とする
         #   記載がある商品（非上場株式・低流動性資産等）を、投資初心者の方に提案するのは適切でないため。
         experience = hearing.get("experience", "")
-        if "初心者" in experience and assumes_experienced_investor(text):
-            score -= 2
-            reasons.append(f"【投資経験】お客様のご回答「{experience}」に対し、商品組成会社が『投資経験がある方』を主な想定購入層としている商品であるため、初心者の方にはやや高度な内容を含む可能性がある点で減点")
+        if "初心者" in experience:
+            if assumes_experienced_investor(text):
+                _apply("投資経験", -2, f"【投資経験】お客様のご回答「{experience}」に対し、商品組成会社が『投資経験がある方』を主な想定購入層としている商品であるため、初心者の方にはやや高度な内容を含む可能性がある点で減点")
+            else:
+                _apply("投資経験", 0, "【投資経験】投資経験者を前提とする特段の記載はありませんでした")
 
         # ⑥.8 保有資産の分散（すでに保有している資産クラスへの過度な偏りを避ける）
         existing_assets_for_diversification = hearing.get("existing_assets", [])
@@ -3085,56 +3155,44 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 "外国株式": ["米国株式型", "先進国株式型", "全世界株式型", "新興国株式型", "インド株式型"],
                 "債券": ["債券型"],
             }
+            matched_diversification = False
             for asset_label, cats in diversification_map.items():
                 if asset_label in existing_assets_for_diversification and fund_category_for_diversification in cats:
-                    score -= 1
-                    reasons.append(f"【保有資産の分散】お客様はすでに「{asset_label}」を保有されているため、同じ資産クラス（{fund_category_for_diversification}）に偏らないよう、やや減点して評価しています")
+                    _apply("保有資産の分散", -1, f"【保有資産の分散】お客様はすでに「{asset_label}」を保有されているため、同じ資産クラス（{fund_category_for_diversification}）に偏らないよう、やや減点して評価しています")
+                    matched_diversification = True
                     break
+            if not matched_diversification:
+                _apply("保有資産の分散", 0, f"【保有資産の分散】本ファンド（{fund_category_for_diversification}）は、すでに保有されている資産クラスと重複していません")
 
         # ⑥.9 年齢層と換金条件との整合性（スコアには反映せず、担当者への注意喚起のみ）
         age_range_val = hearing.get("age_range", "")
         if "75歳以上" in age_range_val and has_liquidity_restriction(text):
-            reasons.append("【ご年齢とのご留意事項】ご高齢のお客様向けに、このファンドの換金・解約条件（大口換金の制限等）についても、資産の流動性確保の観点から改めてご確認いただくことをおすすめします（この項目はスコアには反映していません）")
-
-        # ⑥.5 コア・サテライト運用の考え方との照合
-        # 定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。それ以外はコア資産。
-        core_sat_pref = hearing.get("core_satellite_pref", "特にこだわらない")
-        fund_core_sat = classify_core_satellite(text, fund_name=name)
-        if core_sat_pref.startswith("コア資産（"):
-            if fund_core_sat == "コア資産":
-                score += 3
-                reasons.append(f"【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドは全世界・先進国・国内株式や伝統的債券等の『コア資産』に分類されるため合致")
-            else:
-                score -= 3
-                reasons.append(f"【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドはテーマ型・新興国・REIT・ハイイールド債等の『サテライト資産』に分類されるため減点")
-        elif core_sat_pref.startswith("コア資産をベースに"):
-            reasons.append(f"【コア・サテライト】お客様のご希望「コア資産をベースにサテライト資産も一部取り入れたい」に対し、本ファンドは『{fund_core_sat}』に分類されます（コア・サテライト双方をバランス良く組み合わせる観点でご検討ください）")
-        elif core_sat_pref.startswith("サテライト資産も積極的に"):
-            if fund_core_sat == "サテライト資産":
-                score += 3
-                reasons.append(f"【コア・サテライト】お客様のご希望「サテライト資産も積極的に組み入れ、プラスアルファのリターンを狙いたい」に対し、本ファンドはテーマ型・新興国・REIT等の『サテライト資産』に分類され、積極的なリターン追求のニーズに合致")
+            _apply("ご年齢とのご留意事項", 0, "【ご年齢とのご留意事項】ご高齢のお客様向けに、このファンドの換金・解約条件（大口換金の制限等）についても、資産の流動性確保の観点から改めてご確認いただくことをおすすめします（この項目はスコアには反映していません）")
 
         # ⑦ 除外したい条件（こだわり条件）との照合
+        avoid_tags_hit = False
         for tag in hearing.get("avoid_tags", []):
             if tag and tag in text:
-                score -= 5
-                reasons.append(f"【除外条件】お客様が除外を希望された「{tag}」に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
+                _apply("除外条件", -5, f"【除外条件】お客様が除外を希望された「{tag}」に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
+                avoid_tags_hit = True
+        if hearing.get("avoid_tags") and not avoid_tags_hit:
+            _apply("除外条件", 0, "【除外条件】お客様が除外を希望された条件への該当はありませんでした")
 
         # ⑧ 自由記述欄のキーワード照合（肯定的な関心事か、除外したい否定的な事柄かを手がかり語から判定）
         positive_matches = [item for item in free_text_items if item["sentiment"] == "positive" and item["keyword"] in text]
         negative_matches = [item for item in free_text_items if item["sentiment"] == "negative" and item["keyword"] in text]
 
-        if positive_matches:
-            score += 4 * len(positive_matches)
-            for item in positive_matches:
-                reasons.append(f"【自由記述】お客様のメモ「{item['clause']}」というご関心（キーワード：{item['keyword']}）に関連する記載がファンドの説明にあるため合致")
+        for item in positive_matches:
+            _apply("自由記述", 4, f"【自由記述】お客様のメモ「{item['clause']}」というご関心（キーワード：{item['keyword']}）に関連する記載がファンドの説明にあるため合致")
+        for item in negative_matches:
+            _apply("自由記述", -6, f"【自由記述】お客様のメモ「{item['clause']}」という除外のご意向（キーワード：{item['keyword']}）に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
+        if hearing.get("free_text", "").strip() and not positive_matches and not negative_matches:
+            _apply("自由記述", 0, "【自由記述】自由記述の内容に関連する記載は、このファンドの説明中には見つかりませんでした")
 
-        if negative_matches:
-            score -= 6 * len(negative_matches)
-            for item in negative_matches:
-                reasons.append(f"【自由記述】お客様のメモ「{item['clause']}」という除外のご意向（キーワード：{item['keyword']}）に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
+        results.append({"fund": name, "score": round(score, 1), "reasons": reasons, "breakdown": breakdown, "trust_pct": trust_pct})
 
-        results.append({"fund": name, "score": round(score, 1), "reasons": reasons, "trust_pct": trust_pct})
+    if return_all:
+        return results
 
     # スコアが同点の場合、コード内での定義順という無意味な基準で結果が決まってしまわないよう、
     # 「信託報酬（コスト）が低い方を優先する」という明確なタイブレークルールを設ける。
@@ -3958,6 +4016,82 @@ def render_result_page():
         summary_text = target_type
 
     st.markdown(f'<div style="background-color: #f0f4f8; border-left: 5px solid #0081c9; padding: 12px 18px; border-radius: 4px; margin-bottom: 20px;"><span style="font-size: 16px; font-weight: bold; color: #0f4c75;">🎯 現在設定されている解説ターゲット：</span><span style="font-size: 16px; color: #1a1a1a;">{summary_text}</span><br><span style="font-size: 14px; color: #555555;">※設定を切り替えたい場合は、STEP 2の画面へ戻って調整してください。</span></div>', unsafe_allow_html=True)
+
+    # --- 📊 設問ごとのマッチ度表 ---
+    # ※絞り込みモードを使った場合はその判定結果（breakdown）を再利用し、使わなかった場合（手動選択）は
+    #   選択済みのファンドに対して同じ判定ロジックを score_and_narrow_funds(..., return_all=True) で
+    #   実行し、順位付け・除外は行わずマッチ度の確認だけに用いる。
+    hearing_for_match = reconstruct_hearing_from_session()
+    is_narrowing_mode_used = "絞り込んでもらう" in st.session_state.get("comparison_mode", "")
+    narrowing_results_session = st.session_state.get("narrowing_results", [])
+    narrowing_fund_names = {r["fund"] for r in narrowing_results_session}
+    selected_fund_set = set(st.session_state.selected_funds)
+
+    if is_narrowing_mode_used and narrowing_results_session and narrowing_fund_names == selected_fund_set:
+        match_results = narrowing_results_session
+    else:
+        match_results = score_and_narrow_funds(
+            st.session_state.selected_funds, st.session_state.uploaded_funds, hearing_for_match,
+            api_key=active_api_key, return_all=True
+        )
+
+    if match_results:
+        def _aggregate_breakdown(breakdown_list):
+            agg = {}
+            for entry in breakdown_list:
+                key = entry["criterion"]
+                if key not in agg:
+                    agg[key] = {"delta": 0.0, "details": []}
+                agg[key]["delta"] += entry["delta"]
+                if entry["detail"]:
+                    agg[key]["details"].append(entry["detail"])
+            return agg
+
+        result_by_fund = {r["fund"]: _aggregate_breakdown(r.get("breakdown", [])) for r in match_results}
+        fund_order = [r["fund"] for r in match_results]
+        present_criteria = [c for c in MATCH_CRITERION_ORDER if any(c in result_by_fund[f] for f in fund_order)]
+
+        with st.expander("📊 設問ごとのマッチ度（お客様属性と各ファンドの適合度）", expanded=True):
+            st.caption("✅：合致（加点）　⚠️：不一致（減点）　➖：この項目の判定は該当なし／中立　セル内の数値はスコアへの加減点です。")
+
+            header_cells = "".join([f"<th style='padding:8px 12px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:center;'>{f}</th>" for f in fund_order])
+            table_html = f"<table style='width:100%; border-collapse:collapse; font-size:14px; margin-bottom:10px;'><tr><th style='padding:8px 12px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:left;'>判定項目（設問）</th>{header_cells}</tr>"
+            for crit in present_criteria:
+                row_cells = ""
+                for f in fund_order:
+                    entry = result_by_fund[f].get(crit)
+                    if entry is None:
+                        cell = "<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:#999;'>➖</td>"
+                    else:
+                        delta = entry["delta"]
+                        if delta > 0:
+                            icon, color = "✅", "#1b7f3a"
+                        elif delta < 0:
+                            icon, color = "⚠️", "#c0392b"
+                        else:
+                            icon, color = "➖", "#888"
+                        cell = f"<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:{color}; font-weight:bold;'>{icon} {delta:+.1f}</td>"
+                    row_cells += cell
+                table_html += f"<tr><td style='padding:8px 12px; border:1px solid #ddd; font-weight:bold;'>{crit}</td>{row_cells}</tr>"
+            table_html += "</table>"
+            st.markdown(table_html, unsafe_allow_html=True)
+
+            # 絞り込みモードを使わなかった場合（手動選択）は、特にアンマッチだった項目を明示する
+            if not is_narrowing_mode_used:
+                st.markdown("<div style='margin-top:16px; font-weight:bold; color:#c0392b;'>⚠️ 特にアンマッチだった項目（手動でご選択いただいたファンドについての参考情報）</div>", unsafe_allow_html=True)
+                any_mismatch = False
+                for f in fund_order:
+                    mismatches = [(c, e) for c, e in result_by_fund[f].items() if e["delta"] < 0]
+                    if mismatches:
+                        any_mismatch = True
+                        mismatch_html = "".join([
+                            f"<li>{c}（{e['delta']:+.1f}点）：{'／'.join(e['details']) if e['details'] else '該当のご希望と一致しない記載があります'}</li>"
+                            for c, e in mismatches
+                        ])
+                        st.markdown(f"<div style='margin-top:8px;'><b>{f}</b><ul style='margin:4px 0 0 0; padding-left:20px; font-size:14px;'>{mismatch_html}</ul></div>", unsafe_allow_html=True)
+                if not any_mismatch:
+                    st.caption("特に大きなアンマッチは見つかりませんでした。")
+
     
     # --- ■ 比較表示機能 ---
     # 比較表を作成するかどうかは、STEP 2の選択画面（AI比較解説開始ボタンの横）で事前に選択済み
