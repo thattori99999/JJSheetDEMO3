@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r41（総合点を星評価＋前向きなラベルで表示するよう改善）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r42（絞り込み根拠・マッチ度表を影響の大きい項目のみに絞って表示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -3905,9 +3905,16 @@ def render_selection_content(active_api_key):
             hearing_snapshot = st.session_state.get("narrowing_hearing_snapshot")
             if hearing_snapshot is not None and hearing_snapshot != hearing:
                 st.warning("⚠️ 上のヒアリング内容が、下に表示されている絞り込み結果を作成した時点の内容から変更されています。最新の内容を反映するには、もう一度「🔍 候補ファンドを絞り込む」を押してください。")
-            reason_map = {r["fund"]: r["reasons"] for r in narrowing_results}
+            # 根拠として表示する理由文は、影響の小さい（加減点がゼロ、または僅少な）項目を除き、
+            # 実際にスコアに大きく影響した項目（|delta| が1点以上）のみに絞る。
+            # ※これまでは「該当なし」等の中立的な理由文も全て表示していたため、本当に重要な根拠が
+            #   埋もれて見えにくくなっていた。
+            reason_map = {
+                r["fund"]: [b["detail"] for b in r.get("breakdown", []) if abs(b["delta"]) >= 1 and b.get("detail")]
+                for r in narrowing_results
+            }
             st.markdown("##### ✅ 絞り込み結果（チェックを調整して最終確定できます）")
-            st.caption("※スコアが同点の場合は、信託報酬（コスト）がより低いファンドを優先して表示しています。")
+            st.caption("※スコアが同点の場合は、信託報酬（コスト）がより低いファンドを優先して表示しています。以下の根拠は、影響の大きかった項目のみを表示しています。")
             for idx, r in enumerate(narrowing_results):
                 fund_name = r["fund"]
                 fund_data = st.session_state.uploaded_funds.get(fund_name, {})
@@ -4156,47 +4163,57 @@ def render_result_page():
 
         result_by_fund = {r["fund"]: _aggregate_breakdown(r.get("breakdown", [])) for r in match_results}
         fund_order = [r["fund"] for r in match_results]
-        present_criteria = [c for c in MATCH_CRITERION_ORDER if any(c in result_by_fund[f] for f in fund_order)]
+        # 表示する判定項目（行）は、いずれのファンドに対しても実質的な影響（|delta| が1点以上）が
+        # 無かった項目を除き、実際にスコアへ大きく影響した項目のみに絞る。
+        # ※以前は全項目を常に表示していたため、大半が「－」で埋まり、何が決め手になったのかが
+        #   分かりにくくなっていた。
+        present_criteria = [
+            c for c in MATCH_CRITERION_ORDER
+            if any(c in result_by_fund[f] and abs(result_by_fund[f][c]["delta"]) >= 1 for f in fund_order)
+        ]
 
         with st.expander("📊 設問ごとのマッチ度（お客様属性と各ファンドの適合度）", expanded=True):
-            st.markdown("<span style='font-size:16px;'>◎：非常に合致　○：合致　－：判定なし／中立　△：やや不一致　×：不一致（大幅減点）　※最終行「総合評価」は、各項目の加減点を合計したスコアを5段階の星評価に変換したものです。</span>", unsafe_allow_html=True)
+            if not present_criteria:
+                st.info("現在のヒアリング内容では、スコアに大きく影響した判定項目が見つかりませんでした。より詳細な選定理由をご確認いただくには、STEP2でヒアリング項目（リスク許容度・投資目的・コストに関する考え方等）をより具体的にご記入ください。")
+            else:
+                st.markdown("<span style='font-size:16px;'>◎：非常に合致　○：合致　－：判定なし／中立　△：やや不一致　×：不一致（大幅減点）　※最終行「総合評価」は、各項目の加減点を合計したスコアを5段階の星評価に変換したものです。</span>", unsafe_allow_html=True)
 
-            def _delta_to_symbol(delta):
-                if delta >= 3:
-                    return "◎", "#1b7f3a"
-                elif delta > 0:
-                    return "○", "#2e8b57"
-                elif delta == 0:
-                    return "－", "#888888"
-                elif delta > -3:
-                    return "△", "#d68910"
-                else:
-                    return "×", "#c0392b"
-
-            header_cells = "".join([f"<th style='padding:10px 14px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:center; font-size:17px;'>{f}</th>" for f in fund_order])
-            table_html = f"<table style='width:100%; border-collapse:collapse; font-size:17px; margin-bottom:10px;'><tr><th style='padding:10px 14px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:left; font-size:17px;'>判定項目（設問）</th>{header_cells}</tr>"
-            for crit in present_criteria:
-                row_cells = ""
-                for f in fund_order:
-                    entry = result_by_fund[f].get(crit)
-                    if entry is None:
-                        cell = "<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; color:#999; font-size:26px;'>－</td>"
+                def _delta_to_symbol(delta):
+                    if delta >= 3:
+                        return "◎", "#1b7f3a"
+                    elif delta > 0:
+                        return "○", "#2e8b57"
+                    elif delta == 0:
+                        return "－", "#888888"
+                    elif delta > -3:
+                        return "△", "#d68910"
                     else:
-                        icon, color = _delta_to_symbol(entry["delta"])
-                        cell = f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; color:{color}; font-weight:bold; font-size:26px;'>{icon}</td>"
-                    row_cells += cell
-                table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; font-size:17px;'>{crit}</td>{row_cells}</tr>"
+                        return "×", "#c0392b"
 
-            # 最終行：総合点（星評価＋実際のスコア合計を併記。星評価の基準は下記キャプション参照）
-            score_by_fund = {r["fund"]: r.get("score", 0) for r in match_results}
-            total_cells = "".join([
-                (lambda stars_label: f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; font-weight:bold; background:#f0f4f8; color:#d68910; font-size:20px;'>{stars_label[0]}<br><span style='font-size:14px; color:#0f4c75; font-weight:normal;'>{stars_label[1]}（{score_by_fund.get(f, 0):+.1f}点）</span></td>")(score_to_star_rating(score_by_fund.get(f, 0)))
-                for f in fund_order
-            ])
-            table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; background:#f0f4f8; font-size:17px;'>総合評価</td>{total_cells}</tr>"
-            table_html += "</table>"
-            st.markdown(table_html, unsafe_allow_html=True)
-            st.caption("★の基準：★5＝+5点以上　★4＝+2点以上　★3＝0点以上　★2＝-3点以上　★1＝-3点未満（括弧内の点数は各項目の加減点を合計した実際のスコアです）")
+                header_cells = "".join([f"<th style='padding:10px 14px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:center; font-size:17px;'>{f}</th>" for f in fund_order])
+                table_html = f"<table style='width:100%; border-collapse:collapse; font-size:17px; margin-bottom:10px;'><tr><th style='padding:10px 14px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:left; font-size:17px;'>判定項目（設問）</th>{header_cells}</tr>"
+                for crit in present_criteria:
+                    row_cells = ""
+                    for f in fund_order:
+                        entry = result_by_fund[f].get(crit)
+                        if entry is None:
+                            cell = "<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; color:#999; font-size:26px;'>－</td>"
+                        else:
+                            icon, color = _delta_to_symbol(entry["delta"])
+                            cell = f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; color:{color}; font-weight:bold; font-size:26px;'>{icon}</td>"
+                        row_cells += cell
+                    table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; font-size:17px;'>{crit}</td>{row_cells}</tr>"
+
+                # 最終行：総合点（星評価＋実際のスコア合計を併記。星評価の基準は下記キャプション参照）
+                score_by_fund = {r["fund"]: r.get("score", 0) for r in match_results}
+                total_cells = "".join([
+                    (lambda stars_label: f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; font-weight:bold; background:#f0f4f8; color:#d68910; font-size:20px;'>{stars_label[0]}<br><span style='font-size:14px; color:#0f4c75; font-weight:normal;'>{stars_label[1]}（{score_by_fund.get(f, 0):+.1f}点）</span></td>")(score_to_star_rating(score_by_fund.get(f, 0)))
+                    for f in fund_order
+                ])
+                table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; background:#f0f4f8; font-size:17px;'>総合評価</td>{total_cells}</tr>"
+                table_html += "</table>"
+                st.markdown(table_html, unsafe_allow_html=True)
+                st.caption("★の基準：★5＝+5点以上　★4＝+2点以上　★3＝0点以上　★2＝-3点以上　★1＝-3点未満（括弧内の点数は各項目の加減点を合計した実際のスコアです）")
 
             # 絞り込みモードを使わなかった場合（手動選択）は、特にアンマッチだった項目を明示する
             if not is_narrowing_mode_used:
