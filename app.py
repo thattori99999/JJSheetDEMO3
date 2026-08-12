@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r44（自由記述のAI解釈結果をセッション内でメモ化し、解説生成時に表の内容がゆらぐ不具合を修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r45（マッチ度表のキャッシュを選択ファンド基準に変更し、詳細解説レポート生成中の自動再実行で表が変動する不具合を修正。手動再計算ボタンを追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -4142,27 +4142,30 @@ def render_result_page():
     st.markdown(f'<div style="background-color: #f0f4f8; border-left: 5px solid #0081c9; padding: 12px 18px; border-radius: 4px; margin-bottom: 20px;"><span style="font-size: 16px; font-weight: bold; color: #0f4c75;">🎯 現在設定されている解説ターゲット：</span><span style="font-size: 16px; color: #1a1a1a;">{summary_text}</span><br><span style="font-size: 14px; color: #555555;">※設定を切り替えたい場合は、STEP 2の画面へ戻って調整してください。</span></div>', unsafe_allow_html=True)
 
     # --- 📊 設問ごとのマッチ度表 ---
-    # ※以前は「絞り込みモードを使った場合はその時点のスナップショット（narrowing_results）を再利用する」
-    #   実装になっていたが、これだと絞り込み実行後にヒアリング内容（自由記述など）を追記・変更しても
-    #   反映されず、「選定ロジックの得点」と「この表の表示」が食い違って見える不具合があった。
-    #   常に現在のヒアリング内容（hearing_for_match）を使って選択済みファンドを再評価することで、
-    #   表の内容が常に「今の設定に基づく実際の判定結果」と一致するようにしている。
-    # ※解説文の生成ボタンを押した際など、ページが再実行されるたびに毎回この計算（自由記述のAI解釈を含む）を
-    #   やり直すと、解説生成のAI呼び出しと重なって不具合が起きやすいため、入力内容が変わらない限りは
-    #   計算結果をセッションにキャッシュして再利用する。
+    # ※以前は「ヒアリング内容が変わったかどうか」もキャッシュキーに含めていたが、これだと
+    #   詳細解説レポートの自動生成中に発生する複数回のページ再実行（st.rerun）のたびに
+    #   微妙な理由で再計算が走ってしまい、「レポート出力のタイミングで表の内容が過去のものに
+    #   戻ったように見える」という不具合につながっていた。
+    #   選択されているファンドの組み合わせが変わらない限り、表の内容は一度計算した結果を
+    #   セッション内で固定して使い続けることで、この不安定さを解消する。
+    #   ヒアリング内容を変更した場合は、下の「🔄 最新のヒアリング内容で再計算する」ボタンで
+    #   明示的に反映できるようにしている。
     hearing_for_match = reconstruct_hearing_from_session()
     is_narrowing_mode_used = "絞り込んでもらう" in st.session_state.get("comparison_mode", "")
 
-    match_cache_key = (tuple(sorted(st.session_state.selected_funds)), json.dumps(hearing_for_match, ensure_ascii=False, sort_keys=True, default=str))
+    funds_key = tuple(sorted(st.session_state.selected_funds))
     cached_match = st.session_state.get("match_table_cache")
-    if cached_match and cached_match.get("key") == match_cache_key:
-        match_results = cached_match["results"]
-    else:
+    force_refresh = st.session_state.pop("force_match_table_refresh", False)
+    needs_recompute = force_refresh or (not cached_match) or (cached_match.get("funds_key") != funds_key)
+
+    if needs_recompute:
         match_results = score_and_narrow_funds(
             st.session_state.selected_funds, st.session_state.uploaded_funds, hearing_for_match,
             api_key=active_api_key, return_all=True
         )
-        st.session_state.match_table_cache = {"key": match_cache_key, "results": match_results}
+        st.session_state.match_table_cache = {"funds_key": funds_key, "results": match_results}
+    else:
+        match_results = cached_match["results"]
 
     if match_results:
         def _aggregate_breakdown(breakdown_list):
@@ -4201,6 +4204,9 @@ def render_result_page():
             present_criteria = [c for c in MATCH_CRITERION_ORDER if c in present_criteria]
 
         with st.expander("📊 設問ごとのマッチ度（お客様属性と各ファンドの適合度）", expanded=True):
+            if st.button("🔄 最新のヒアリング内容で再計算する", key="refresh_match_table_btn", help="STEP2でヒアリング内容を変更された場合、このボタンで表に反映できます。"):
+                st.session_state.force_match_table_refresh = True
+                st.rerun()
             if not present_criteria:
                 st.info("現在のヒアリング内容では、スコアに大きく影響した判定項目が見つかりませんでした。より詳細な選定理由をご確認いただくには、STEP2でヒアリング項目（リスク許容度・投資目的・コストに関する考え方等）をより具体的にご記入ください。")
             else:
