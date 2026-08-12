@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r40（マッチ度表を常に最新のヒアリング内容で再計算するよう一本化し古いスナップショット表示の不整合を修正、記号を大幅拡大）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r41（総合点を星評価＋前向きなラベルで表示するよう改善）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2821,6 +2821,27 @@ MATCH_CRITERION_ORDER = [
     "コア・サテライト", "投資目的", "運用期間との整合性", "投資経験", "ご年齢との整合性",
     "NISA活用意向", "為替リスク許容度", "保有資産の分散",
 ]
+
+
+def score_to_star_rating(score):
+    """総合点（各判定項目の加減点の合計）は、あくまで内部的な相対評価の指標であり、
+    「100点満点中◯点」のような絶対評価ではないため、そのまま数値だけを見せると
+    実際の適合度以上にネガティブな印象を与えてしまう（例：+1点は一見低く見えるが、
+    他の候補と比べて明確に優れている場合もある）。
+    そこで、総合点を5段階の星評価に変換し、数値と併せて表示することで、
+    どの程度の適合度なのかを直感的かつ前向きに伝えられるようにする。
+    ※あくまで表示上の変換であり、判定ロジック自体（加減点の計算）は変更していない。"""
+    if score >= 5:
+        stars, label = 5, "非常に高い適合度です"
+    elif score >= 2:
+        stars, label = 4, "高い適合度です"
+    elif score >= 0:
+        stars, label = 3, "一定の適合度があります"
+    elif score >= -3:
+        stars, label = 2, "一部の観点で適合しない点があります"
+    else:
+        stars, label = 1, "多くの観点で適合しない点があります"
+    return "★" * stars + "☆" * (5 - stars), label
 
 
 def build_selection_policy(hearing):
@@ -4138,7 +4159,7 @@ def render_result_page():
         present_criteria = [c for c in MATCH_CRITERION_ORDER if any(c in result_by_fund[f] for f in fund_order)]
 
         with st.expander("📊 設問ごとのマッチ度（お客様属性と各ファンドの適合度）", expanded=True):
-            st.markdown("<span style='font-size:16px;'>◎：非常に合致　○：合致　－：判定なし／中立　△：やや不一致　×：不一致（大幅減点）　※最終行「総合点」は実際のスコア（合計点）です。</span>", unsafe_allow_html=True)
+            st.markdown("<span style='font-size:16px;'>◎：非常に合致　○：合致　－：判定なし／中立　△：やや不一致　×：不一致（大幅減点）　※最終行「総合評価」は、各項目の加減点を合計したスコアを5段階の星評価に変換したものです。</span>", unsafe_allow_html=True)
 
             def _delta_to_symbol(delta):
                 if delta >= 3:
@@ -4166,15 +4187,16 @@ def render_result_page():
                     row_cells += cell
                 table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; font-size:17px;'>{crit}</td>{row_cells}</tr>"
 
-            # 最終行：総合点（実際のスコア合計）
+            # 最終行：総合点（星評価＋実際のスコア合計を併記。星評価の基準は下記キャプション参照）
             score_by_fund = {r["fund"]: r.get("score", 0) for r in match_results}
             total_cells = "".join([
-                f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; font-weight:bold; background:#f0f4f8; color:#0f4c75; font-size:19px;'>{score_by_fund.get(f, 0):+.1f}点</td>"
+                (lambda stars_label: f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; font-weight:bold; background:#f0f4f8; color:#d68910; font-size:20px;'>{stars_label[0]}<br><span style='font-size:14px; color:#0f4c75; font-weight:normal;'>{stars_label[1]}（{score_by_fund.get(f, 0):+.1f}点）</span></td>")(score_to_star_rating(score_by_fund.get(f, 0)))
                 for f in fund_order
             ])
-            table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; background:#f0f4f8; font-size:17px;'>総合点</td>{total_cells}</tr>"
+            table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; background:#f0f4f8; font-size:17px;'>総合評価</td>{total_cells}</tr>"
             table_html += "</table>"
             st.markdown(table_html, unsafe_allow_html=True)
+            st.caption("★の基準：★5＝+5点以上　★4＝+2点以上　★3＝0点以上　★2＝-3点以上　★1＝-3点未満（括弧内の点数は各項目の加減点を合計した実際のスコアです）")
 
             # 絞り込みモードを使わなかった場合（手動選択）は、特にアンマッチだった項目を明示する
             if not is_narrowing_mode_used:
