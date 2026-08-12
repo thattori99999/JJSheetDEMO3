@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r39（全14判定項目が常にマッチ度表に表示されるよう修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r40（マッチ度表を常に最新のヒアリング内容で再計算するよう一本化し古いスナップショット表示の不整合を修正、記号を大幅拡大）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -4099,31 +4099,27 @@ def render_result_page():
     st.markdown(f'<div style="background-color: #f0f4f8; border-left: 5px solid #0081c9; padding: 12px 18px; border-radius: 4px; margin-bottom: 20px;"><span style="font-size: 16px; font-weight: bold; color: #0f4c75;">🎯 現在設定されている解説ターゲット：</span><span style="font-size: 16px; color: #1a1a1a;">{summary_text}</span><br><span style="font-size: 14px; color: #555555;">※設定を切り替えたい場合は、STEP 2の画面へ戻って調整してください。</span></div>', unsafe_allow_html=True)
 
     # --- 📊 設問ごとのマッチ度表 ---
-    # ※絞り込みモードを使った場合はその判定結果（breakdown）を再利用し、使わなかった場合（手動選択）は
-    #   選択済みのファンドに対して同じ判定ロジックを score_and_narrow_funds(..., return_all=True) で
-    #   実行し、順位付け・除外は行わずマッチ度の確認だけに用いる。
+    # ※以前は「絞り込みモードを使った場合はその時点のスナップショット（narrowing_results）を再利用する」
+    #   実装になっていたが、これだと絞り込み実行後にヒアリング内容（自由記述など）を追記・変更しても
+    #   反映されず、「選定ロジックの得点」と「この表の表示」が食い違って見える不具合があった。
+    #   常に現在のヒアリング内容（hearing_for_match）を使って選択済みファンドを再評価することで、
+    #   表の内容が常に「今の設定に基づく実際の判定結果」と一致するようにしている。
     # ※解説文の生成ボタンを押した際など、ページが再実行されるたびに毎回この計算（自由記述のAI解釈を含む）を
     #   やり直すと、解説生成のAI呼び出しと重なって不具合が起きやすいため、入力内容が変わらない限りは
     #   計算結果をセッションにキャッシュして再利用する。
     hearing_for_match = reconstruct_hearing_from_session()
     is_narrowing_mode_used = "絞り込んでもらう" in st.session_state.get("comparison_mode", "")
-    narrowing_results_session = st.session_state.get("narrowing_results", [])
-    narrowing_fund_names = {r["fund"] for r in narrowing_results_session}
-    selected_fund_set = set(st.session_state.selected_funds)
 
-    if is_narrowing_mode_used and narrowing_results_session and narrowing_fund_names == selected_fund_set:
-        match_results = narrowing_results_session
+    match_cache_key = (tuple(sorted(st.session_state.selected_funds)), json.dumps(hearing_for_match, ensure_ascii=False, sort_keys=True, default=str))
+    cached_match = st.session_state.get("match_table_cache")
+    if cached_match and cached_match.get("key") == match_cache_key:
+        match_results = cached_match["results"]
     else:
-        match_cache_key = (tuple(sorted(st.session_state.selected_funds)), json.dumps(hearing_for_match, ensure_ascii=False, sort_keys=True, default=str))
-        cached_match = st.session_state.get("match_table_cache")
-        if cached_match and cached_match.get("key") == match_cache_key:
-            match_results = cached_match["results"]
-        else:
-            match_results = score_and_narrow_funds(
-                st.session_state.selected_funds, st.session_state.uploaded_funds, hearing_for_match,
-                api_key=active_api_key, return_all=True
-            )
-            st.session_state.match_table_cache = {"key": match_cache_key, "results": match_results}
+        match_results = score_and_narrow_funds(
+            st.session_state.selected_funds, st.session_state.uploaded_funds, hearing_for_match,
+            api_key=active_api_key, return_all=True
+        )
+        st.session_state.match_table_cache = {"key": match_cache_key, "results": match_results}
 
     if match_results:
         def _aggregate_breakdown(breakdown_list):
@@ -4142,7 +4138,7 @@ def render_result_page():
         present_criteria = [c for c in MATCH_CRITERION_ORDER if any(c in result_by_fund[f] for f in fund_order)]
 
         with st.expander("📊 設問ごとのマッチ度（お客様属性と各ファンドの適合度）", expanded=True):
-            st.caption("◎：非常に合致　○：合致　－：判定なし／中立　△：やや不一致　×：不一致（大幅減点）　※最終行「総合点」は実際のスコア（合計点）です。")
+            st.markdown("<span style='font-size:16px;'>◎：非常に合致　○：合致　－：判定なし／中立　△：やや不一致　×：不一致（大幅減点）　※最終行「総合点」は実際のスコア（合計点）です。</span>", unsafe_allow_html=True)
 
             def _delta_to_symbol(delta):
                 if delta >= 3:
@@ -4156,27 +4152,27 @@ def render_result_page():
                 else:
                     return "×", "#c0392b"
 
-            header_cells = "".join([f"<th style='padding:8px 12px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:center;'>{f}</th>" for f in fund_order])
-            table_html = f"<table style='width:100%; border-collapse:collapse; font-size:14px; margin-bottom:10px;'><tr><th style='padding:8px 12px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:left;'>判定項目（設問）</th>{header_cells}</tr>"
+            header_cells = "".join([f"<th style='padding:10px 14px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:center; font-size:17px;'>{f}</th>" for f in fund_order])
+            table_html = f"<table style='width:100%; border-collapse:collapse; font-size:17px; margin-bottom:10px;'><tr><th style='padding:10px 14px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:left; font-size:17px;'>判定項目（設問）</th>{header_cells}</tr>"
             for crit in present_criteria:
                 row_cells = ""
                 for f in fund_order:
                     entry = result_by_fund[f].get(crit)
                     if entry is None:
-                        cell = "<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:#999;'>－</td>"
+                        cell = "<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; color:#999; font-size:26px;'>－</td>"
                     else:
                         icon, color = _delta_to_symbol(entry["delta"])
-                        cell = f"<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:{color}; font-weight:bold; font-size:16px;'>{icon}</td>"
+                        cell = f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; color:{color}; font-weight:bold; font-size:26px;'>{icon}</td>"
                     row_cells += cell
-                table_html += f"<tr><td style='padding:8px 12px; border:1px solid #ddd; font-weight:bold;'>{crit}</td>{row_cells}</tr>"
+                table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; font-size:17px;'>{crit}</td>{row_cells}</tr>"
 
             # 最終行：総合点（実際のスコア合計）
             score_by_fund = {r["fund"]: r.get("score", 0) for r in match_results}
             total_cells = "".join([
-                f"<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; font-weight:bold; background:#f0f4f8; color:#0f4c75; font-size:15px;'>{score_by_fund.get(f, 0):+.1f}点</td>"
+                f"<td style='padding:10px 14px; border:1px solid #ddd; text-align:center; font-weight:bold; background:#f0f4f8; color:#0f4c75; font-size:19px;'>{score_by_fund.get(f, 0):+.1f}点</td>"
                 for f in fund_order
             ])
-            table_html += f"<tr><td style='padding:8px 12px; border:1px solid #ddd; font-weight:bold; background:#f0f4f8;'>総合点</td>{total_cells}</tr>"
+            table_html += f"<tr><td style='padding:10px 14px; border:1px solid #ddd; font-weight:bold; background:#f0f4f8; font-size:17px;'>総合点</td>{total_cells}</tr>"
             table_html += "</table>"
             st.markdown(table_html, unsafe_allow_html=True)
 
