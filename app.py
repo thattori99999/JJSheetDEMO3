@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r42（絞り込み根拠・マッチ度表を影響の大きい項目のみに絞って表示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r44（自由記述のAI解釈結果をセッション内でメモ化し、解説生成時に表の内容がゆらぐ不具合を修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2698,6 +2698,21 @@ def interpret_free_text_via_ai(free_text, api_key):
     return analyze_free_text_sentiment(free_text)
 
 
+def get_cached_free_text_items(free_text, api_key):
+    """自由記述欄のAIによる解釈結果を、同じ自由記述の内容である限りセッション内で再利用する。
+    ※AI（Gemini）の応答は、同一の入力・同一のプロンプトであっても呼び出しごとに多少ゆらぐことがある。
+    もしこのゆらぎを毎回そのまま使ってしまうと、絞り込みボタンを押した直後の結果と、その後ページが
+    再実行されるたびに再計算されるSTEP3のマッチ度表の結果が、理由なく微妙に異なって見えてしまう
+    （「解説文生成のタイミングで表の内容が変わって見える」という不具合の主な原因）。
+    このキャッシュにより、同じ自由記述に対する解釈は、変更されるまで常に同じ結果になるようにする。"""
+    cache = st.session_state.get("free_text_interpretation_cache")
+    if cache and cache.get("text") == free_text:
+        return cache["items"]
+    items = interpret_free_text_via_ai(free_text, api_key)
+    st.session_state.free_text_interpretation_cache = {"text": free_text, "items": items}
+    return items
+
+
 # --- 🗂️ ファンド分類（投資対象の分類）の判定（AIを使わない、キーワードベースの決定的分類） ---
 FUND_CATEGORY_RULES = [
     ("全世界株式型", ["全世界", "オール・カントリー", "オルカン"]),
@@ -2918,7 +2933,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
     戻り値：[{"fund": ファンド名, "score": 点数, "reasons": [根拠文字列, ...],
               "breakdown": [{"criterion":str, "delta":float, "match":"match"|"mismatch"|"neutral", "detail":str}, ...]}, ...]
              （スコア降順。return_all=Trueの場合は fund_list の順序を保持）"""
-    free_text_items = interpret_free_text_via_ai(hearing.get("free_text", ""), api_key)
+    free_text_items = get_cached_free_text_items(hearing.get("free_text", ""), api_key)
 
     # --- 🌟 NISA活用意向のハードフィルター ---
     # ※これまでは加点・減点（±2点）のみで判定していたため、他の項目（コスト・自由記述等）の
@@ -4163,14 +4178,27 @@ def render_result_page():
 
         result_by_fund = {r["fund"]: _aggregate_breakdown(r.get("breakdown", [])) for r in match_results}
         fund_order = [r["fund"] for r in match_results]
-        # 表示する判定項目（行）は、いずれのファンドに対しても実質的な影響（|delta| が1点以上）が
-        # 無かった項目を除き、実際にスコアへ大きく影響した項目のみに絞る。
-        # ※以前は全項目を常に表示していたため、大半が「－」で埋まり、何が決め手になったのかが
-        #   分かりにくくなっていた。
-        present_criteria = [
-            c for c in MATCH_CRITERION_ORDER
-            if any(c in result_by_fund[f] and abs(result_by_fund[f][c]["delta"]) >= 1 for f in fund_order)
-        ]
+
+        # 表示する判定項目（行）は、まず実質的な影響（|delta| が1点以上）があった項目を優先して選ぶ。
+        # ただし、影響の大きい項目だけでは表があまりに簡素になってしまう場合があるため、
+        # 最低でも5項目は表示されるよう、影響度（各項目の最大|delta|）が大きい順に不足分を補う。
+        # ※完全に無関係な（全ファンドで0点の）項目まで無理に埋めるのではなく、
+        #   「多少でも影響のあった項目」を優先して補うことで、表示の意味を保っている。
+        def _max_abs_delta(c):
+            return max((abs(result_by_fund[f][c]["delta"]) for f in fund_order if c in result_by_fund[f]), default=0)
+
+        significant_criteria = [c for c in MATCH_CRITERION_ORDER if _max_abs_delta(c) >= 1]
+        present_criteria = list(significant_criteria)
+        MIN_DISPLAY_CRITERIA = 5
+        if len(present_criteria) < MIN_DISPLAY_CRITERIA:
+            remaining_candidates = [c for c in MATCH_CRITERION_ORDER if c not in present_criteria]
+            remaining_candidates.sort(key=_max_abs_delta, reverse=True)
+            for c in remaining_candidates:
+                if len(present_criteria) >= MIN_DISPLAY_CRITERIA:
+                    break
+                present_criteria.append(c)
+            # MATCH_CRITERION_ORDER の並び順を保って表示する
+            present_criteria = [c for c in MATCH_CRITERION_ORDER if c in present_criteria]
 
         with st.expander("📊 設問ごとのマッチ度（お客様属性と各ファンドの適合度）", expanded=True):
             if not present_criteria:
