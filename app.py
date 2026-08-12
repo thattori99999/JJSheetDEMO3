@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r37（設問ごとのマッチ度を数値化しSTEP3に表で表示。手動選択時はアンマッチ項目も明示）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r38（マッチ度表を5段階記号+総合点に変更、キャッシュで解説生成時の不具合を修正、投資経験/年齢/資産集中度の判定を拡充）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2457,6 +2457,19 @@ def assumes_experienced_investor(text):
     return any(k in text for k in EXPERIENCED_INVESTOR_KEYWORDS)
 
 
+# 初心者・高齢者にとって「運用が複雑」と思われる商品構造の判定キーワード
+# （複数ファンドを組み合わせる仕組み・オルタナティブ投資・特殊な為替ヘッジ設計・予想分配金提示型等）
+COMPLEX_PRODUCT_KEYWORDS = [
+    "ファンド・オブ・ファンズ", "ファンド・オブ・ファンズ(FoFs)", "ファンド・オブ・ファンズ（FoFs）",
+    "オルタナティブ", "プライベート・エクイティ", "プライベートエクイティ", "ヘッジファンド",
+    "ブル型", "ベア型", "ブル・ベア", "限定為替ヘッジ", "予想分配金提示型", "コアラップ",
+]
+
+
+def is_complex_product(text):
+    return any(k in text for k in COMPLEX_PRODUCT_KEYWORDS)
+
+
 def fund_supports_nisa_frame(text, frame_label):
     """指定したNISA区分（『成長投資枠』または『つみたて投資枠』）に、ファンドが実際に
     対象となっているかどうかを判定する。
@@ -2804,9 +2817,9 @@ def reconstruct_hearing_from_session():
 
 # STEP3の「設問ごとのマッチ度」表に表示する判定項目の並び順（優先度の高い順）
 MATCH_CRITERION_ORDER = [
-    "除外条件", "自由記述", "コスト", "コスト（運用期間考慮）", "リスク許容度",
-    "コア・サテライト", "投資目的", "運用期間との整合性", "投資経験",
-    "NISA活用意向", "為替リスク許容度", "保有資産の分散", "ご年齢とのご留意事項",
+    "除外条件", "自由記述", "コスト", "コスト（運用期間考慮）", "リスク許容度", "資産集中度",
+    "コア・サテライト", "投資目的", "運用期間との整合性", "投資経験", "ご年齢との整合性",
+    "NISA活用意向", "為替リスク許容度", "保有資産の分散",
 ]
 
 
@@ -3138,13 +3151,16 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
 
         # ⑥.7 投資経験と想定購入層との照合
         # ※重要情報シートの「商品組成に携わる事業者が想定する購入層」欄に、投資経験者を前提とする
-        #   記載がある商品（非上場株式・低流動性資産等）を、投資初心者の方に提案するのは適切でないため。
+        #   記載がある商品（非上場株式・低流動性資産等）、または複数ファンドを組み合わせる仕組みや
+        #   オルタナティブ運用等、構造が複雑な商品を、投資初心者の方に提案するのは適切でないため。
         experience = hearing.get("experience", "")
         if "初心者" in experience:
             if assumes_experienced_investor(text):
                 _apply("投資経験", -2, f"【投資経験】お客様のご回答「{experience}」に対し、商品組成会社が『投資経験がある方』を主な想定購入層としている商品であるため、初心者の方にはやや高度な内容を含む可能性がある点で減点")
+            elif is_complex_product(text):
+                _apply("投資経験", -2, f"【投資経験】お客様のご回答「{experience}」に対し、複数のファンドを組み合わせる仕組みやオルタナティブ運用等、初心者には理解が難しい可能性がある商品構造であるため減点")
             else:
-                _apply("投資経験", 0, "【投資経験】投資経験者を前提とする特段の記載はありませんでした")
+                _apply("投資経験", 0, "【投資経験】投資経験者を前提とする特段の記載や、特に複雑な商品構造はありませんでした")
 
         # ⑥.8 保有資産の分散（すでに保有している資産クラスへの過度な偏りを避ける）
         existing_assets_for_diversification = hearing.get("existing_assets", [])
@@ -3164,10 +3180,41 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
             if not matched_diversification:
                 _apply("保有資産の分散", 0, f"【保有資産の分散】本ファンド（{fund_category_for_diversification}）は、すでに保有されている資産クラスと重複していません")
 
-        # ⑥.9 年齢層と換金条件との整合性（スコアには反映せず、担当者への注意喚起のみ）
+        # ⑥.9 年齢層との整合性
+        # ・お客様が若い世代の場合：毎月決算・毎月分配型は、長期の複利効果を活かす観点でやや非効率なため減点。
+        # ・お客様が高齢の場合：複雑な商品構造、または過去5年の値ブレ幅が大きい（リスクが高い）商品は減点。
         age_range_val = hearing.get("age_range", "")
-        if "75歳以上" in age_range_val and has_liquidity_restriction(text):
-            _apply("ご年齢とのご留意事項", 0, "【ご年齢とのご留意事項】ご高齢のお客様向けに、このファンドの換金・解約条件（大口換金の制限等）についても、資産の流動性確保の観点から改めてご確認いただくことをおすすめします（この項目はスコアには反映していません）")
+        is_young_age = "20代以下" in age_range_val
+        is_elderly_age = ("60〜75歳" in age_range_val) or ("75歳以上" in age_range_val)
+        is_monthly_distribution_fund = any(k in text for k in ["毎月決算", "毎月分配"])
+
+        if is_young_age and is_monthly_distribution_fund:
+            _apply("ご年齢との整合性", -2, f"【ご年齢との整合性】お客様のご年齢「{age_range_val}」は長期の複利効果を活かせる世代であるため、毎月決算・毎月分配型の商品は資産成長の効率がやや下がる可能性がある点で減点")
+        elif is_elderly_age:
+            elderly_penalty_applied = False
+            if is_complex_product(text):
+                _apply("ご年齢との整合性", -2, f"【ご年齢との整合性】お客様のご年齢「{age_range_val}」に対し、複数のファンドを組み合わせる仕組みやオルタナティブ運用等、複雑な商品構造であるため減点")
+                elderly_penalty_applied = True
+            if volatility_spread is not None and volatility_spread >= 50:
+                _apply("ご年齢との整合性", -2, f"【ご年齢との整合性】お客様のご年齢「{age_range_val}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントとリスクの高い商品であるため減点")
+                elderly_penalty_applied = True
+            if not elderly_penalty_applied:
+                _apply("ご年齢との整合性", 0, "【ご年齢との整合性】特に複雑な商品構造や高いリスクは確認されませんでした")
+        else:
+            _apply("ご年齢との整合性", 0, "【ご年齢との整合性】特段の留意事項はありません")
+
+        # ⑥.10 資産集中度合いを踏まえたリスク評価
+        # ※保有金融資産に対して今回の投資予定額の割合が大きい場合、値動きの大きい商品（高リスク・サテライト資産）
+        #   への集中投資は、資産全体としての下振れリスクを高めるため、リスク許容度の調整だけでなく、
+        #   ここでも明示的に減点し、判定理由として可視化する。
+        if concentration_level in ("high", "medium"):
+            is_high_risk_fund = (volatility_spread is not None and volatility_spread >= 50) or (fund_core_sat == "サテライト資産")
+            if is_high_risk_fund:
+                concentration_penalty = -3 if concentration_level == "high" else -2
+                risk_desc = f"値ブレ幅{volatility_spread}ポイント" if volatility_spread is not None else "サテライト資産"
+                _apply("資産集中度", concentration_penalty, f"【資産集中度】保有資産に対する今回の投資予定額の割合が{'高い' if concentration_level == 'high' else 'やや高い'}ため、値動きの大きい商品（{risk_desc}）への集中投資はリスクが大きくなる点で減点")
+            else:
+                _apply("資産集中度", 0, "【資産集中度】このファンドは値動きが比較的小さいため、資産集中の観点でも特段の懸念はありません")
 
         # ⑦ 除外したい条件（こだわり条件）との照合
         avoid_tags_hit = False
@@ -3364,17 +3411,17 @@ def render_admin_content(active_api_key):
 - **見る項目**：「換金・解約の条件」欄の流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）の記載有無。
 - **判定**：想定運用期間が短期（3年未満）の場合、流動性制限がある商品は減点。
 
-#### ⑧ 投資経験 × 想定購入層
-- **見る項目**：「商品組成に携わる事業者が想定する購入層」欄の、投資経験者を前提とする記載の有無。
-- **判定**：投資経験「初心者」の回答に対し、経験者を想定した記載がある商品は減点。
+#### ⑧ 投資経験 × 想定購入層・商品構造
+- **見る項目**：「商品組成に携わる事業者が想定する購入層」欄の、投資経験者を前提とする記載の有無。また、ファンド・オブ・ファンズ／オルタナティブ／プライベート・エクイティ／ブル・ベア型等、構造が複雑と考えられる商品の有無。
+- **判定**：投資経験「初心者」の回答に対し、経験者を想定した記載がある商品、または構造が複雑な商品は減点。
 
 #### ⑨ 保有金融資産（分散の観点）
 - **見る項目**：ファンド分類（投資対象の分類）。
 - **判定**：すでに保有している資産クラス（国内株式・外国株式・債券）と同じ分類のファンドは、分散を促す観点でやや減点。
 
-#### ⑩ ご年齢とのご留意事項
-- **見る項目**：「換金・解約の条件」欄の流動性制限。
-- **判定**：75歳以上のお客様に流動性制限のある商品が候補に入った場合、スコアには反映せず注意喚起のみ表示。
+#### ⑩ ご年齢との整合性
+- **見る項目**：毎月決算・毎月分配型の有無、商品構造の複雑さ、過去5年の値ブレ幅。
+- **判定**：ご年齢が若い（20代以下）場合、毎月決算・毎月分配型は複利効率の観点で減点。ご年齢が高い（60歳以上）場合、複雑な商品構造、または値ブレ幅が大きい（リスクが高い）商品は減点。
 
 #### ⑪ 除外したい条件
 - **見る項目**：本文全体でのキーワード（新興国・レバレッジ・ハイイールド・テクノロジー・脱炭素）の有無。
@@ -3384,8 +3431,14 @@ def render_admin_content(active_api_key):
 - **見る項目**：自由記述の全文。
 - **判定**：AI（Gemini）が文脈からトピックと肯定的／否定的なニュアンスを判定。「保有している」等の記述は否定的（除外）として扱う。AIが利用できない場合は簡易なキーワード判定にフォールバック。
 
+#### ⑬ 資産集中度合いを踏まえたリスク評価
+- **見る項目**：保有金融資産の規模目安と、今回の投資予定額の比率。過去5年の値ブレ幅、コア・サテライトの分類。
+- **判定**：投資予定額の比率が高い（概ね資産の3割以上、特に5割以上）場合、値ブレ幅が大きい、またはサテライト資産に分類される商品は明確に減点。①のリスク許容度の判定自体も、この比率に応じて一段階保守的に補正されます。
+
 ---
 ※ファンド分類（コア／サテライトの土台）は、「全世界株式型」「米国株式型」「先進国株式型」「インド株式型」「新興国株式型」「国内株式型」「テーマ型株式（脱炭素・テクノロジー等）」「不動産投資型（REIT）」「バランス型（複合資産）」「債券型」のいずれかに、ファンド名・本文のキーワードから判定しています。
+
+※STEP3の結果画面では、上記①〜⑬の各判定項目について、◎（非常に合致）〜×（不一致）の5段階記号でファンドごとのマッチ度を一覧表示し、最終行に実際の総合点（スコア合計）を表示します。「絞り込みを行う」を選択しなかった場合も、手動選択したファンドについて同じロジックで判定し、特にアンマッチだった項目を明示します。
         """)
 
     # 1. APIキー設定
@@ -4021,6 +4074,9 @@ def render_result_page():
     # ※絞り込みモードを使った場合はその判定結果（breakdown）を再利用し、使わなかった場合（手動選択）は
     #   選択済みのファンドに対して同じ判定ロジックを score_and_narrow_funds(..., return_all=True) で
     #   実行し、順位付け・除外は行わずマッチ度の確認だけに用いる。
+    # ※解説文の生成ボタンを押した際など、ページが再実行されるたびに毎回この計算（自由記述のAI解釈を含む）を
+    #   やり直すと、解説生成のAI呼び出しと重なって不具合が起きやすいため、入力内容が変わらない限りは
+    #   計算結果をセッションにキャッシュして再利用する。
     hearing_for_match = reconstruct_hearing_from_session()
     is_narrowing_mode_used = "絞り込んでもらう" in st.session_state.get("comparison_mode", "")
     narrowing_results_session = st.session_state.get("narrowing_results", [])
@@ -4030,10 +4086,16 @@ def render_result_page():
     if is_narrowing_mode_used and narrowing_results_session and narrowing_fund_names == selected_fund_set:
         match_results = narrowing_results_session
     else:
-        match_results = score_and_narrow_funds(
-            st.session_state.selected_funds, st.session_state.uploaded_funds, hearing_for_match,
-            api_key=active_api_key, return_all=True
-        )
+        match_cache_key = (tuple(sorted(st.session_state.selected_funds)), json.dumps(hearing_for_match, ensure_ascii=False, sort_keys=True, default=str))
+        cached_match = st.session_state.get("match_table_cache")
+        if cached_match and cached_match.get("key") == match_cache_key:
+            match_results = cached_match["results"]
+        else:
+            match_results = score_and_narrow_funds(
+                st.session_state.selected_funds, st.session_state.uploaded_funds, hearing_for_match,
+                api_key=active_api_key, return_all=True
+            )
+            st.session_state.match_table_cache = {"key": match_cache_key, "results": match_results}
 
     if match_results:
         def _aggregate_breakdown(breakdown_list):
@@ -4052,7 +4114,19 @@ def render_result_page():
         present_criteria = [c for c in MATCH_CRITERION_ORDER if any(c in result_by_fund[f] for f in fund_order)]
 
         with st.expander("📊 設問ごとのマッチ度（お客様属性と各ファンドの適合度）", expanded=True):
-            st.caption("✅：合致（加点）　⚠️：不一致（減点）　➖：この項目の判定は該当なし／中立　セル内の数値はスコアへの加減点です。")
+            st.caption("◎：非常に合致　○：合致　－：判定なし／中立　△：やや不一致　×：不一致（大幅減点）　※最終行「総合点」は実際のスコア（合計点）です。")
+
+            def _delta_to_symbol(delta):
+                if delta >= 3:
+                    return "◎", "#1b7f3a"
+                elif delta > 0:
+                    return "○", "#2e8b57"
+                elif delta == 0:
+                    return "－", "#888888"
+                elif delta > -3:
+                    return "△", "#d68910"
+                else:
+                    return "×", "#c0392b"
 
             header_cells = "".join([f"<th style='padding:8px 12px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:center;'>{f}</th>" for f in fund_order])
             table_html = f"<table style='width:100%; border-collapse:collapse; font-size:14px; margin-bottom:10px;'><tr><th style='padding:8px 12px; border:1px solid #ddd; background:#0f4c75; color:#fff; text-align:left;'>判定項目（設問）</th>{header_cells}</tr>"
@@ -4061,18 +4135,20 @@ def render_result_page():
                 for f in fund_order:
                     entry = result_by_fund[f].get(crit)
                     if entry is None:
-                        cell = "<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:#999;'>➖</td>"
+                        cell = "<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:#999;'>－</td>"
                     else:
-                        delta = entry["delta"]
-                        if delta > 0:
-                            icon, color = "✅", "#1b7f3a"
-                        elif delta < 0:
-                            icon, color = "⚠️", "#c0392b"
-                        else:
-                            icon, color = "➖", "#888"
-                        cell = f"<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:{color}; font-weight:bold;'>{icon} {delta:+.1f}</td>"
+                        icon, color = _delta_to_symbol(entry["delta"])
+                        cell = f"<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; color:{color}; font-weight:bold; font-size:16px;'>{icon}</td>"
                     row_cells += cell
                 table_html += f"<tr><td style='padding:8px 12px; border:1px solid #ddd; font-weight:bold;'>{crit}</td>{row_cells}</tr>"
+
+            # 最終行：総合点（実際のスコア合計）
+            score_by_fund = {r["fund"]: r.get("score", 0) for r in match_results}
+            total_cells = "".join([
+                f"<td style='padding:8px 12px; border:1px solid #ddd; text-align:center; font-weight:bold; background:#f0f4f8; color:#0f4c75; font-size:15px;'>{score_by_fund.get(f, 0):+.1f}点</td>"
+                for f in fund_order
+            ])
+            table_html += f"<tr><td style='padding:8px 12px; border:1px solid #ddd; font-weight:bold; background:#f0f4f8;'>総合点</td>{total_cells}</tr>"
             table_html += "</table>"
             st.markdown(table_html, unsafe_allow_html=True)
 
