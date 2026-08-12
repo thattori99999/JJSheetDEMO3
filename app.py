@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r38（マッチ度表を5段階記号+総合点に変更、キャッシュで解説生成時の不具合を修正、投資経験/年齢/資産集中度の判定を拡充）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r39（全14判定項目が常にマッチ度表に表示されるよう修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -3022,11 +3022,11 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 # コストの高低による加減点は行わない（運用内容・リターンを優先するご意向のため）
                 _apply("コスト", 0, "【コスト】コストよりも運用内容・リターンを重視するご意向のため、加減点は行っていません")
             else:
-                # 「特にこだわらない」を選択された場合は、コストに関する加減点・理由表示を一切行わない。
-                # ※以前はここでも軽い低コスト優遇を行い「コストを抑えたいニーズに合致」と表示していたが、
-                #   お客様が明示的に「特にこだわらない」を選んでいるにもかかわらず、
-                #   あたかもコスト面のご要望があったかのような矛盾した表示になっていたため撤廃した。
-                pass
+                # 「特にこだわらない」を選択された場合は、コストによる加減点は行わないが、
+                # 判定項目自体は常に表として表示されるよう、中立（0点）のエントリを記録する。
+                _apply("コスト", 0, "【コスト】コストについて特にこだわりのご希望はないため、加減点は行っていません")
+        else:
+            _apply("コスト", 0, "【コスト】信託報酬の記載を本文から確認できませんでした")
 
         # ③.5 想定運用期間を考慮したコスト評価
         # ※信託報酬（年率コスト）は「保有期間に比例して累積する」性質のコストであるため、
@@ -3056,9 +3056,19 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                         _apply("コスト（運用期間考慮）", 2, f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、保有期間が短く信託報酬の差が累積しにくいため、それよりも一度きり発生する購入時手数料が無料である点の方が実質的な負担軽減として重要です")
                     elif purchase_pct >= 2.0:
                         _apply("コスト（運用期間考慮）", -2, f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」では、短期間の保有にもかかわらず購入時手数料が{purchase_pct:g}%と高いため、信託報酬の高低以上に実質的な負担が大きくなる可能性がある点にご留意ください")
+                    else:
+                        _apply("コスト（運用期間考慮）", 0, f"【コスト（運用期間考慮）】購入時手数料は{purchase_pct:g}%で標準的な水準です")
+                else:
+                    _apply("コスト（運用期間考慮）", 0, "【コスト（運用期間考慮）】購入時手数料の記載を本文から確認できませんでした")
             elif horizon == "10年超（長期）":
                 if trust_pct is not None and trust_pct < 0.3:
                     _apply("コスト（運用期間考慮）", 1.5, f"【コスト（運用期間考慮）】お客様の想定運用期間「{horizon}」のように長期間保有される場合、信託報酬のわずかな差でも複利で大きな差になるため、年率{trust_pct:g}%という低水準の信託報酬は特に有利に働きます")
+                else:
+                    _apply("コスト（運用期間考慮）", 0, "【コスト（運用期間考慮）】長期保有の観点で特に有利な低信託報酬ではありません")
+            else:
+                _apply("コスト（運用期間考慮）", 0, "【コスト（運用期間考慮）】想定運用期間が中期・未設定のため、この観点での加減点は行っていません")
+        else:
+            _apply("コスト（運用期間考慮）", 0, "【コスト（運用期間考慮）】コストよりも運用内容・リターンを重視するご意向のため、加減点は行っていません")
 
         # ④ NISA活用意向との照合
         # ※以前は「希望する枠の対象である場合のみ加点」で、希望しない枠（例：成長投資枠希望なのに
@@ -3078,6 +3088,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 _apply("NISA活用意向", 2, f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品であるため合致")
             else:
                 _apply("NISA活用意向", -2, f"【NISA活用意向】お客様のご希望「{nisa_pref}」に対し、NISA成長投資枠の対象商品ではないため減点")
+        else:
+            _apply("NISA活用意向", 0, "【NISA活用意向】NISA活用について特にこだわりのご希望はないため、加減点は行っていません")
 
         # ⑤ 為替リスク許容度との照合
         # ※以前は「為替変動リスク」「外国」「為替ヘッジなし」という完全一致のみで判定していたため、
@@ -3091,6 +3103,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 _apply("為替リスク許容度", 2, f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替に関する記載がない国内資産中心の商品であるため合致")
             else:
                 _apply("為替リスク許容度", -2, f"【為替リスク許容度】お客様のご希望「{fx_pref}」に対し、為替変動リスクの記載がある商品のため減点（このファンドは為替の影響を受ける可能性がある点にご注意ください）")
+        else:
+            _apply("為替リスク許容度", 0, "【為替リスク許容度】為替リスクについて特にこだわりのご希望はないため、加減点は行っていません")
 
         # ⑥ 投資目的との照合（目的ごとに、目的・機能／換金解約条件／実績リスクを踏まえて判定）
         purpose = hearing.get("purpose", "")
@@ -3139,6 +3153,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 _apply("コア・サテライト", 3, "【コア・サテライト】お客様のご希望「サテライト資産も積極的に組み入れ、プラスアルファのリターンを狙いたい」に対し、本ファンドはテーマ型・新興国・REIT等の『サテライト資産』に分類され、積極的なリターン追求のニーズに合致")
             else:
                 _apply("コア・サテライト", 0, f"【コア・サテライト】本ファンドは『{fund_core_sat}』に分類されます")
+        else:
+            _apply("コア・サテライト", 0, f"【コア・サテライト】コア・サテライトについて特にこだわりのご希望はないため、加減点は行っていません（本ファンドは『{fund_core_sat}』に分類されます）")
 
         # ⑥.6 想定運用期間と換金・解約条件（流動性制限）との整合性
         # ※想定運用期間が短いお客様に対し、大口換金の制限や低流動性資産への投資など、
@@ -3148,6 +3164,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 _apply("運用期間との整合性", -3, f"【運用期間との整合性】お客様の想定運用期間「{horizon}」に対し、大口換金の制限や低流動性資産への投資など、換金・解約に一定の制約がある商品であるため、短期での資金化が必要な場合は不向きな可能性がある点で減点")
             else:
                 _apply("運用期間との整合性", 0, "【運用期間との整合性】換金・解約に関する特段の制約は確認されませんでした")
+        else:
+            _apply("運用期間との整合性", 0, "【運用期間との整合性】想定運用期間が中期・長期・未設定のため、この観点での加減点は行っていません")
 
         # ⑥.7 投資経験と想定購入層との照合
         # ※重要情報シートの「商品組成に携わる事業者が想定する購入層」欄に、投資経験者を前提とする
@@ -3161,6 +3179,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 _apply("投資経験", -2, f"【投資経験】お客様のご回答「{experience}」に対し、複数のファンドを組み合わせる仕組みやオルタナティブ運用等、初心者には理解が難しい可能性がある商品構造であるため減点")
             else:
                 _apply("投資経験", 0, "【投資経験】投資経験者を前提とする特段の記載や、特に複雑な商品構造はありませんでした")
+        else:
+            _apply("投資経験", 0, f"【投資経験】お客様のご回答「{experience}」は初心者ではないため、この観点での加減点は行っていません")
 
         # ⑥.8 保有資産の分散（すでに保有している資産クラスへの過度な偏りを避ける）
         existing_assets_for_diversification = hearing.get("existing_assets", [])
@@ -3179,6 +3199,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                     break
             if not matched_diversification:
                 _apply("保有資産の分散", 0, f"【保有資産の分散】本ファンド（{fund_category_for_diversification}）は、すでに保有されている資産クラスと重複していません")
+        else:
+            _apply("保有資産の分散", 0, "【保有資産の分散】保有金融資産のご回答がないため、この観点での加減点は行っていません")
 
         # ⑥.9 年齢層との整合性
         # ・お客様が若い世代の場合：毎月決算・毎月分配型は、長期の複利効果を活かす観点でやや非効率なため減点。
@@ -3215,6 +3237,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 _apply("資産集中度", concentration_penalty, f"【資産集中度】保有資産に対する今回の投資予定額の割合が{'高い' if concentration_level == 'high' else 'やや高い'}ため、値動きの大きい商品（{risk_desc}）への集中投資はリスクが大きくなる点で減点")
             else:
                 _apply("資産集中度", 0, "【資産集中度】このファンドは値動きが比較的小さいため、資産集中の観点でも特段の懸念はありません")
+        else:
+            _apply("資産集中度", 0, "【資産集中度】保有金融資産・投資予定額のご回答がない、または集中度が低いため、この観点での加減点は行っていません")
 
         # ⑦ 除外したい条件（こだわり条件）との照合
         avoid_tags_hit = False
@@ -3224,6 +3248,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
                 avoid_tags_hit = True
         if hearing.get("avoid_tags") and not avoid_tags_hit:
             _apply("除外条件", 0, "【除外条件】お客様が除外を希望された条件への該当はありませんでした")
+        elif not hearing.get("avoid_tags"):
+            _apply("除外条件", 0, "【除外条件】除外を希望される条件のご指定がないため、加減点は行っていません")
 
         # ⑧ 自由記述欄のキーワード照合（肯定的な関心事か、除外したい否定的な事柄かを手がかり語から判定）
         positive_matches = [item for item in free_text_items if item["sentiment"] == "positive" and item["keyword"] in text]
@@ -3235,6 +3261,8 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
             _apply("自由記述", -6, f"【自由記述】お客様のメモ「{item['clause']}」という除外のご意向（キーワード：{item['keyword']}）に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
         if hearing.get("free_text", "").strip() and not positive_matches and not negative_matches:
             _apply("自由記述", 0, "【自由記述】自由記述の内容に関連する記載は、このファンドの説明中には見つかりませんでした")
+        elif not hearing.get("free_text", "").strip():
+            _apply("自由記述", 0, "【自由記述】自由記述のご記入がないため、加減点は行っていません")
 
         results.append({"fund": name, "score": round(score, 1), "reasons": reasons, "breakdown": breakdown, "trust_pct": trust_pct})
 
