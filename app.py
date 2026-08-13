@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r45（マッチ度表のキャッシュを選択ファンド基準に変更し、詳細解説レポート生成中の自動再実行で表が変動する不具合を修正。手動再計算ボタンを追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r46（ヒアリングに「投資したい／避けたい地域・国」を追加、欧州・中国のファンド分類も新設）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2722,8 +2722,12 @@ FUND_CATEGORY_RULES = [
     ("テーマ型株式（脱炭素・環境）", ["脱炭素", "カーボン"]),
     ("テーマ型株式（テクノロジー）", ["テクノロジー", "ロボティクス", "半導体", "サイバーセキュリティ", "人工知能"]),
     ("米国株式型", ["米国株式", "S&P500", "S&P 500", "米国の企業"]),
+    # 欧州・中国は、地域を指定するヒアリング設問（投資したい／避けたい地域）に対応するため、
+    # より広範な「先進国株式型」「新興国株式型」よりも優先して具体的に判定する。
+    ("欧州株式型", ["欧州", "英国および欧州"]),
     ("先進国株式型", ["先進国の株式", "先進国株式"]),
     ("インド株式型", ["インド"]),
+    ("中国株式型", ["中国", "中華人民共和国"]),
     ("新興国株式型", ["新興国"]),
     ("国内株式型", ["日本株式", "TOPIX", "東証株価指数", "日経平均", "225"]),
     ("バランス型（複合資産）", ["REIT", "不動産投資信託証券"]),
@@ -2770,6 +2774,18 @@ SATELLITE_EXTRA_KEYWORDS = [
     "オルタナティブ", "コモディティ", "商品先物", "ヘッジファンド", "プライベートエクイティ", "プライベート・エクイティ",
     "非上場株式",
 ]
+
+# 「投資したい地域・国」「避けたい地域・国」設問の選択肢と、ファンド分類（投資対象の分類）との対応表
+REGION_CATEGORY_MAP = {
+    "米国": "米国株式型",
+    "全世界": "全世界株式型",
+    "先進国（日本除く）": "先進国株式型",
+    "欧州": "欧州株式型",
+    "インド": "インド株式型",
+    "中国": "中国株式型",
+    "新興国全般": "新興国株式型",
+    "日本": "国内株式型",
+}
 
 
 def classify_core_satellite(text, fund_name=""):
@@ -2825,6 +2841,8 @@ def reconstruct_hearing_from_session():
         "existing_assets": st.session_state.get("result_existing_assets", []),
         "asset_scale": st.session_state.get("result_asset_scale", "回答しない"),
         "investment_amount": st.session_state.get("result_investment_amount", "回答しない"),
+        "region_pref": st.session_state.get("result_region_pref", []),
+        "region_avoid": st.session_state.get("result_region_avoid", []),
         "avoid_tags": st.session_state.get("result_avoid_tags", []),
         "free_text": st.session_state.get("result_free_text", ""),
     }
@@ -2833,7 +2851,7 @@ def reconstruct_hearing_from_session():
 # STEP3の「設問ごとのマッチ度」表に表示する判定項目の並び順（優先度の高い順）
 MATCH_CRITERION_ORDER = [
     "除外条件", "自由記述", "コスト", "コスト（運用期間考慮）", "リスク許容度", "資産集中度",
-    "コア・サテライト", "投資目的", "運用期間との整合性", "投資経験", "ご年齢との整合性",
+    "コア・サテライト", "地域のご意向", "投資目的", "運用期間との整合性", "投資経験", "ご年齢との整合性",
     "NISA活用意向", "為替リスク許容度", "保有資産の分散",
 ]
 
@@ -2873,6 +2891,8 @@ def build_selection_policy(hearing):
     horizon = hearing.get("horizon", "特にこだわらない")
     experience = hearing.get("experience", "")
     existing_assets = hearing.get("existing_assets", [])
+    region_pref = hearing.get("region_pref", [])
+    region_avoid = hearing.get("region_avoid", [])
     avoid_tags = hearing.get("avoid_tags", [])
     free_text = hearing.get("free_text", "").strip()
 
@@ -2903,6 +2923,13 @@ def build_selection_policy(hearing):
     priority_list.append(tolerance_label)
     if core_satellite_pref != "特にこだわらない":
         priority_list.append(f"コア・サテライト運用の考え方：「{core_satellite_pref}」")
+    if region_pref or region_avoid:
+        region_detail = []
+        if region_pref:
+            region_detail.append(f"投資したい地域：{'、'.join(region_pref)}")
+        if region_avoid:
+            region_detail.append(f"避けたい地域：{'、'.join(region_avoid)}")
+        priority_list.append("地域のご意向（" + "／".join(region_detail) + "）")
     if purpose:
         priority_list.append(f"投資目的：「{purpose}」")
     if horizon == "3年未満（短期）":
@@ -3276,6 +3303,30 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("資産集中度", 0, "【資産集中度】保有金融資産・投資予定額のご回答がない、または集中度が低いため、この観点での加減点は行っていません")
 
+        # ⑥.11 投資したい地域・避けたい地域との照合
+        # ※ファンド分類（投資対象の分類）が示す地域と、お客様が明示的に「投資したい」「避けたい」とされた
+        #   地域を照合する。既存の「除外条件」（新興国・レバレッジ等の5タグ）よりも地域を直接指定できるため、
+        #   より柔軟かつ精度の高い絞り込みが可能になる。
+        region_pref_list = hearing.get("region_pref", [])
+        region_avoid_list = hearing.get("region_avoid", [])
+        if region_pref_list or region_avoid_list:
+            fund_region_category = classify_fund_type(text, fund_name=name)
+            region_matched = False
+            for region in region_pref_list:
+                cat = REGION_CATEGORY_MAP.get(region)
+                if cat and fund_region_category == cat:
+                    _apply("地域のご意向", 3, f"【地域のご意向】お客様が積極的に投資したいとされた地域「{region}」に該当するファンド分類（{cat}）であるため合致")
+                    region_matched = True
+            for region in region_avoid_list:
+                cat = REGION_CATEGORY_MAP.get(region)
+                if cat and fund_region_category == cat:
+                    _apply("地域のご意向", -5, f"【地域のご意向】お客様が避けたいとされた地域「{region}」に該当するファンド分類（{cat}）であるため大幅減点")
+                    region_matched = True
+            if not region_matched:
+                _apply("地域のご意向", 0, f"【地域のご意向】本ファンド（{fund_region_category}）は、ご指定の投資したい／避けたい地域のいずれにも該当しません")
+        else:
+            _apply("地域のご意向", 0, "【地域のご意向】投資したい地域・避けたい地域のご指定がないため、加減点は行っていません")
+
         # ⑦ 除外したい条件（こだわり条件）との照合
         avoid_tags_hit = False
         for tag in hearing.get("avoid_tags", []):
@@ -3471,6 +3522,10 @@ def render_admin_content(active_api_key):
 - **見る項目**：ファンド分類（投資対象の分類）を土台に、テーマ型・新興国・REIT・ハイイールド債・オルタナティブ等を「サテライト資産」、それ以外を「コア資産」と分類。
 - **判定**：ご希望に応じて該当区分を加点、コア中心のご希望時はサテライト資産を減点。
 
+#### ⑥.5 地域のご意向（投資したい／避けたい地域・国）
+- **見る項目**：ファンド分類（投資対象の分類）が示す地域区分（米国株式型・全世界株式型・先進国株式型・欧州株式型・インド株式型・中国株式型・新興国株式型・国内株式型）。
+- **判定**：「積極的に投資したい地域」に一致する分類のファンドは加点、「避けたい地域」に一致する分類のファンドは大幅減点。両方とも複数選択可能。
+
 #### ⑦ 想定運用期間 × 換金・解約条件
 - **見る項目**：「換金・解約の条件」欄の流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）の記載有無。
 - **判定**：想定運用期間が短期（3年未満）の場合、流動性制限がある商品は減点。
@@ -3500,7 +3555,7 @@ def render_admin_content(active_api_key):
 - **判定**：投資予定額の比率が高い（概ね資産の3割以上、特に5割以上）場合、値ブレ幅が大きい、またはサテライト資産に分類される商品は明確に減点。①のリスク許容度の判定自体も、この比率に応じて一段階保守的に補正されます。
 
 ---
-※ファンド分類（コア／サテライトの土台）は、「全世界株式型」「米国株式型」「先進国株式型」「インド株式型」「新興国株式型」「国内株式型」「テーマ型株式（脱炭素・テクノロジー等）」「不動産投資型（REIT）」「バランス型（複合資産）」「債券型」のいずれかに、ファンド名・本文のキーワードから判定しています。
+※ファンド分類（コア／サテライトの土台）は、「全世界株式型」「米国株式型」「欧州株式型」「先進国株式型」「インド株式型」「中国株式型」「新興国株式型」「国内株式型」「テーマ型株式（脱炭素・テクノロジー等）」「不動産投資型（REIT）」「バランス型（複合資産）」「債券型」のいずれかに、ファンド名・本文のキーワードから判定しています。
 
 ※STEP3の結果画面では、上記①〜⑬の各判定項目について、◎（非常に合致）〜×（不一致）の5段階記号でファンドごとのマッチ度を一覧表示し、最終行に実際の総合点（スコア合計）を表示します。「絞り込みを行う」を選択しなかった場合も、手動選択したファンドについて同じロジックで判定し、特にアンマッチだった項目を明示します。
         """)
@@ -3765,6 +3820,20 @@ def render_selection_content(active_api_key):
             index=3,
             key="result_cost_pref"
         )
+        region_pref = st.multiselect(
+            "積極的に投資したい地域・国（複数選択可）：",
+            options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
+            default=[],
+            placeholder="選択してください（複数選択可）",
+            key="result_region_pref"
+        )
+        region_avoid = st.multiselect(
+            "避けたい地域・国（複数選択可）：",
+            options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
+            default=[],
+            placeholder="選択してください（複数選択可）",
+            key="result_region_avoid"
+        )
         avoid_tags = st.multiselect(
             "除外したい条件（該当するものがあれば選択）：",
             options=["新興国", "レバレッジ", "ハイイールド", "テクノロジー", "脱炭素"],
@@ -3879,6 +3948,8 @@ def render_selection_content(active_api_key):
             "existing_assets": existing_assets,
             "asset_scale": asset_scale,
             "investment_amount": investment_amount,
+            "region_pref": region_pref,
+            "region_avoid": region_avoid,
             "avoid_tags": avoid_tags,
             "free_text": free_text,
         }
@@ -4105,6 +4176,8 @@ def render_result_page():
         assets_val = st.session_state.get("result_existing_assets", [])
         scale_val = st.session_state.get("result_asset_scale", "回答しない")
         invest_amount_val = st.session_state.get("result_investment_amount", "回答しない")
+        region_pref_val = st.session_state.get("result_region_pref", [])
+        region_avoid_val = st.session_state.get("result_region_avoid", [])
         avoid_val = st.session_state.get("result_avoid_tags", [])
         free_text_val = st.session_state.get("result_free_text", "").strip()
 
@@ -4130,6 +4203,10 @@ def render_result_page():
             summary_items.append(f"資産規模: {scale_val}")
         if invest_amount_val != "回答しない":
             summary_items.append(f"投資予定額: {invest_amount_val}")
+        if region_pref_val:
+            summary_items.append(f"投資したい地域: {'、'.join(region_pref_val)}")
+        if region_avoid_val:
+            summary_items.append(f"避けたい地域: {'、'.join(region_avoid_val)}")
         if avoid_val:
             summary_items.append(f"除外条件: {'、'.join(avoid_val)}")
         if free_text_val:
@@ -4516,6 +4593,8 @@ def render_result_page():
         selected_nisa_pref = st.session_state.get("result_nisa_pref", "特にこだわらない")
         selected_core_satellite_pref = st.session_state.get("result_core_satellite_pref", "特にこだわらない")
         selected_cost_pref = st.session_state.get("result_cost_pref", "特にこだわらない")
+        selected_region_pref = st.session_state.get("result_region_pref", [])
+        selected_region_avoid = st.session_state.get("result_region_avoid", [])
         selected_avoid_tags = st.session_state.get("result_avoid_tags", [])
         selected_existing_assets = st.session_state.get("result_existing_assets", [])
         selected_asset_scale = st.session_state.get("result_asset_scale", "回答しない")
@@ -4554,6 +4633,10 @@ def render_result_page():
                 extra_profile_lines.append(f"・現在保有している金融資産：{'、'.join(selected_existing_assets)}")
             if selected_asset_scale != "回答しない":
                 extra_profile_lines.append(f"・保有金融資産の規模目安：{selected_asset_scale}")
+            if selected_region_pref:
+                extra_profile_lines.append(f"・積極的に投資したい地域・国：{'、'.join(selected_region_pref)}")
+            if selected_region_avoid:
+                extra_profile_lines.append(f"・避けたい地域・国：{'、'.join(selected_region_avoid)}")
             if selected_avoid_tags:
                 extra_profile_lines.append(f"・除外を希望する条件：{'、'.join(selected_avoid_tags)}")
             if selected_free_text:
