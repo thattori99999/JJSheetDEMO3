@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r46（ヒアリングに「投資したい／避けたい地域・国」を追加、欧州・中国のファンド分類も新設）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r47（目標金額から必要利回りを算出する機能を追加。リスク許容度との矛盾チェックつき）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2435,6 +2435,57 @@ def extract_5yr_volatility_spread(text):
         return round(float(m.group(2)) - float(m.group(1)), 1)
     except ValueError:
         return None
+
+
+def extract_5yr_average_return(text):
+    """『平均◯% 最低...最高...』という記載から、過去5年間の平均リターンの数値を抽出する。
+    抽出できない場合はNoneを返す。"""
+    m = re.search(r"平均\s*([-+]?\d+\.?\d*)\s*[%％]", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def solve_required_annual_return(target_amount, lump_sum, monthly_contribution, years):
+    """目標金額・現在の一括投資額・毎月積立額・運用年数から、目標達成に必要な年率リターン（％）を
+    数値的に（二分法で）逆算する。
+    ※あくまで手数料・税金を考慮しない単純化した将来価値の計算であり、実際の運用成果を
+    保証するものでは一切ない。判定結果を表示する際は、必ずその旨を明示すること。
+    解が求まらない場合（目標が現実的でない、入力が不正等）はNoneを返す。"""
+    if not target_amount or target_amount <= 0 or not years or years <= 0:
+        return None
+    lump_sum = lump_sum or 0
+    monthly_contribution = monthly_contribution or 0
+    if lump_sum <= 0 and monthly_contribution <= 0:
+        return None
+
+    def future_value(annual_rate):
+        # 一括投資分：複利計算
+        fv = lump_sum * (1 + annual_rate) ** years
+        # 積立投資分：毎月複利（年金の将来価値）
+        if monthly_contribution > 0:
+            monthly_rate = annual_rate / 12
+            months = years * 12
+            if abs(monthly_rate) < 1e-9:
+                fv += monthly_contribution * months
+            else:
+                fv += monthly_contribution * (((1 + monthly_rate) ** months - 1) / monthly_rate)
+        return fv
+
+    # 二分法で目標金額に到達する年率を探索する（-50%〜+50%の範囲で十分カバーできる）
+    low, high = -0.5, 0.5
+    if future_value(high) < target_amount:
+        return None  # この積立額・年数では、現実的な利回り水準では到達不可能
+    for _ in range(100):
+        mid = (low + high) / 2
+        if future_value(mid) < target_amount:
+            low = mid
+        else:
+            high = mid
+    return round(high * 100, 1)  # ％表示に変換
 
 
 # 換金・解約条件に「流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）」があるかどうかの判定キーワード
@@ -2845,13 +2896,21 @@ def reconstruct_hearing_from_session():
         "region_avoid": st.session_state.get("result_region_avoid", []),
         "avoid_tags": st.session_state.get("result_avoid_tags", []),
         "free_text": st.session_state.get("result_free_text", ""),
+        "required_return": (
+            solve_required_annual_return(
+                st.session_state.get("result_target_amount"),
+                st.session_state.get("result_lump_sum_amount", 0.0),
+                st.session_state.get("result_monthly_contribution", 0.0),
+                st.session_state.get("result_investment_years_precise"),
+            ) if st.session_state.get("result_use_goal_calc", False) else None
+        ),
     }
 
 
 # STEP3の「設問ごとのマッチ度」表に表示する判定項目の並び順（優先度の高い順）
 MATCH_CRITERION_ORDER = [
     "除外条件", "自由記述", "コスト", "コスト（運用期間考慮）", "リスク許容度", "資産集中度",
-    "コア・サテライト", "地域のご意向", "投資目的", "運用期間との整合性", "投資経験", "ご年齢との整合性",
+    "コア・サテライト", "地域のご意向", "目標利回りとの整合性", "投資目的", "運用期間との整合性", "投資経験", "ご年齢との整合性",
     "NISA活用意向", "為替リスク許容度", "保有資産の分散",
 ]
 
@@ -2930,6 +2989,9 @@ def build_selection_policy(hearing):
         if region_avoid:
             region_detail.append(f"避けたい地域：{'、'.join(region_avoid)}")
         priority_list.append("地域のご意向（" + "／".join(region_detail) + "）")
+    required_return = hearing.get("required_return")
+    if required_return is not None:
+        priority_list.append(f"目標金額から逆算した必要利回り（約{required_return}%、過去の実績に基づく参考比較であり将来の成果を保証するものではありません）")
     if purpose:
         priority_list.append(f"投資目的：「{purpose}」")
     if horizon == "3年未満（短期）":
@@ -3327,6 +3389,26 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("地域のご意向", 0, "【地域のご意向】投資したい地域・避けたい地域のご指定がないため、加減点は行っていません")
 
+        # ⑥.12 目標金額から逆算した必要利回りとの整合性
+        # ※必要利回りは、税金・手数料を考慮しない単純な将来価値計算による参考値であり、
+        #   各ファンドの「過去5年平均リターン」も過去の実績にすぎず、将来の成果を保証するものではない。
+        #   そのため、ここでの加減点は「目安としての方向性」を示すに留め、断定的な判定は行わない。
+        required_return = hearing.get("required_return")
+        if required_return is not None:
+            avg_return = extract_5yr_average_return(text)
+            if avg_return is not None:
+                diff = avg_return - required_return
+                if diff >= 0:
+                    _apply("目標利回りとの整合性", 3, f"【目標利回りとの整合性】目標達成に必要な利回り（約{required_return}%、将来価値の単純計算による参考値）に対し、本ファンドの過去5年平均リターンは{avg_return}%であり上回っているため合致（過去の実績は将来の成果を保証するものではありません）")
+                elif diff >= -3:
+                    _apply("目標利回りとの整合性", 0, f"【目標利回りとの整合性】必要利回り（約{required_return}%）に対し、過去5年平均リターン{avg_return}%はやや下回りますが僅差です")
+                else:
+                    _apply("目標利回りとの整合性", -3, f"【目標利回りとの整合性】必要利回り（約{required_return}%）に対し、過去5年平均リターンは{avg_return}%と大きく下回るため減点（過去の実績は将来の成果を保証するものではありません）")
+            else:
+                _apply("目標利回りとの整合性", 0, "【目標利回りとの整合性】このファンドの過去5年平均リターンのデータを確認できませんでした")
+        else:
+            _apply("目標利回りとの整合性", 0, "【目標利回りとの整合性】目標金額の設定がないため、加減点は行っていません")
+
         # ⑦ 除外したい条件（こだわり条件）との照合
         avoid_tags_hit = False
         for tag in hearing.get("avoid_tags", []):
@@ -3525,6 +3607,12 @@ def render_admin_content(active_api_key):
 #### ⑥.5 地域のご意向（投資したい／避けたい地域・国）
 - **見る項目**：ファンド分類（投資対象の分類）が示す地域区分（米国株式型・全世界株式型・先進国株式型・欧州株式型・インド株式型・中国株式型・新興国株式型・国内株式型）。
 - **判定**：「積極的に投資したい地域」に一致する分類のファンドは加点、「避けたい地域」に一致する分類のファンドは大幅減点。両方とも複数選択可能。
+
+#### ⑥.6 目標利回りとの整合性（任意）
+- **見る項目**：「目標金額」「一括投資額／毎月積立額」「運用年数」から、税金・手数料を考慮しない単純計算（将来価値の逆算）で必要な年率利回りを算出し、各ファンドの「〔参考〕過去5年間の収益率」の平均値と比較。
+- **判定**：ファンドの過去5年平均リターンが必要利回りを上回れば加点、大きく下回れば減点。
+- **リスク許容度との矛盾チェック**：算出された必要利回りが、申告されたリスク許容度の水準に対して一般的に狙いにくい場合、STEP2画面上に注意喚起を表示（スコアには反映せず、担当者への警告のみ）。
+- **★重要な留意事項**：これはあくまで将来価値の単純計算による参考値であり、また各ファンドの実績も過去のものにすぎず、将来の運用成果を保証するものでは一切ありません。画面上にもその旨を必ず明記しています。
 
 #### ⑦ 想定運用期間 × 換金・解約条件
 - **見る項目**：「換金・解約の条件」欄の流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）の記載有無。
@@ -3841,6 +3929,56 @@ def render_selection_content(active_api_key):
             placeholder="選択してください（複数選択可）",
             key="result_avoid_tags"
         )
+
+        st.markdown("---")
+        st.markdown("##### 🎯 目標金額から必要な利回りを算出する（任意）")
+        use_goal_calc = st.checkbox(
+            "目標金額をもとに、必要な利回りを算出して絞り込みに反映する",
+            value=False,
+            key="result_use_goal_calc"
+        )
+        target_amount = None
+        investment_method = "一括投資"
+        lump_sum_amount = 0.0
+        monthly_contribution = 0.0
+        investment_years_precise = None
+        required_return = None
+
+        if use_goal_calc:
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                target_amount = st.number_input("目標金額（万円）：", min_value=0.0, value=1000.0, step=50.0, key="result_target_amount")
+                investment_years_precise = st.number_input("具体的な運用年数（年）：", min_value=1, max_value=50, value=10, step=1, key="result_investment_years_precise")
+            with col_g2:
+                investment_method = st.selectbox(
+                    "運用方法：",
+                    options=["一括投資", "積立投資", "一括＋積立の併用"],
+                    key="result_investment_method"
+                )
+                if investment_method in ("一括投資", "一括＋積立の併用"):
+                    lump_sum_amount = st.number_input("一括投資額（万円）：", min_value=0.0, value=100.0, step=10.0, key="result_lump_sum_amount")
+                if investment_method in ("積立投資", "一括＋積立の併用"):
+                    monthly_contribution = st.number_input("毎月の積立額（万円）：", min_value=0.0, value=3.0, step=0.5, key="result_monthly_contribution")
+
+            required_return = solve_required_annual_return(target_amount, lump_sum_amount, monthly_contribution, investment_years_precise)
+
+            if required_return is None:
+                st.error("⚠️ ご入力の条件（投資額・積立額・年数）では、現実的な利回り水準で目標金額に到達することが難しい可能性があります。目標金額を見直すか、積立額・運用年数を増やすことをご検討ください。")
+            else:
+                st.info(f"📊 目標達成に必要な年率利回り（税金・手数料を考慮しない単純計算）：約 **{required_return}%**\n\n※これはあくまで将来価値の単純計算に基づく参考値であり、実際には税金・手数料等がかかります。また、この後の絞り込みで比較に用いる各ファンドの実績値も過去の運用実績にすぎず、将来の運用成果を保証するものでは一切ありません。")
+                mismatch_cap = None
+                if "非常に低い" in tolerance:
+                    mismatch_cap = 2.0
+                elif "非常に高い" in tolerance:
+                    mismatch_cap = 15.0
+                elif "低い" in tolerance:
+                    mismatch_cap = 4.0
+                elif "高い" in tolerance:
+                    mismatch_cap = 10.0
+                else:
+                    mismatch_cap = 6.0
+                if required_return > mismatch_cap:
+                    st.warning(f"⚠️ 算出された必要利回り（約{required_return}%）は、お客様が申告されたリスク許容度「{tolerance}」の範囲では、一般的に狙いにくい水準です。目標金額・運用期間の見直し、積立額の増額、またはリスク許容度について改めてお客様とご確認いただくことをおすすめします。")
         free_text = st.text_area(
             "⭐ その他、お客様についての自由記述（任意・できるだけご記入をお願いします）：",
             placeholder="例：住宅ローン返済中で当面の余裕資金は少なめ／数年以内に教育資金の取り崩し予定あり／ESG投資に関心がある　など、上記の項目でカバーしきれない情報があれば自由にご記入ください。",
@@ -3952,6 +4090,7 @@ def render_selection_content(active_api_key):
             "region_avoid": region_avoid,
             "avoid_tags": avoid_tags,
             "free_text": free_text,
+            "required_return": required_return,
         }
 
         # --- 📋 絞り込みを行う前に、まず「このお客様属性ではどのようなファンドが適しているか」の方針を提示する ---
@@ -4207,6 +4346,15 @@ def render_result_page():
             summary_items.append(f"投資したい地域: {'、'.join(region_pref_val)}")
         if region_avoid_val:
             summary_items.append(f"避けたい地域: {'、'.join(region_avoid_val)}")
+        if st.session_state.get("result_use_goal_calc", False):
+            _req_ret = solve_required_annual_return(
+                st.session_state.get("result_target_amount"),
+                st.session_state.get("result_lump_sum_amount", 0.0),
+                st.session_state.get("result_monthly_contribution", 0.0),
+                st.session_state.get("result_investment_years_precise"),
+            )
+            if _req_ret is not None:
+                summary_items.append(f"目標必要利回り: 約{_req_ret}%（参考値）")
         if avoid_val:
             summary_items.append(f"除外条件: {'、'.join(avoid_val)}")
         if free_text_val:
