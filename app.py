@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r47（目標金額から必要利回りを算出する機能を追加。リスク許容度との矛盾チェックつき）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r48（コア・サテライト設問廃止、投資目的を分配方針と分離、インフレ対策ロジックをリスクベースに簡素化、除外条件→注目する投資対象へ転換、運用スタイルの好み・基本スタンス/今回意向の分離設問を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2838,6 +2838,20 @@ REGION_CATEGORY_MAP = {
     "日本": "国内株式型",
 }
 
+# 「注目する投資対象は？」設問の選択肢と、本文中の検索キーワードとの対応表
+# （選択肢の文言そのままでは本文にヒットしにくいものがあるため、同義語・関連語を含めている）
+FOCUS_ASSET_KEYWORD_MAP = {
+    "ハイイールド": ["ハイイールド", "ハイ・イールド", "高利回り債"],
+    "新興国": ["新興国"],
+    "小型成長株": ["小型株", "小型成長株", "中小型株"],
+    "コモディティ（金）": ["コモディティ", "商品先物", "金価格"],
+    "テクノロジー": ["テクノロジー", "ロボティクス", "半導体", "サイバーセキュリティ", "人工知能"],
+    "バイオ": ["バイオ", "バイオテクノロジー", "製薬"],
+    "資源": ["資源", "エネルギー"],
+    "レバレッジ": ["レバレッジ", "ブル型", "ベア型", "ブル・ベア"],
+    "オルタナティブ": ["オルタナティブ", "プライベート・エクイティ", "プライベートエクイティ", "ヘッジファンド"],
+}
+
 
 def classify_core_satellite(text, fund_name=""):
     """コア・サテライト運用の考え方に基づき、ファンドを『コア資産』『サテライト資産』のいずれかに分類する。
@@ -2881,20 +2895,23 @@ def reconstruct_hearing_from_session():
             "高い" if ("高い" in tolerance) else "普通"
         ),
         "tolerance_raw": tolerance,
+        "base_tolerance_raw": st.session_state.get("result_base_tolerance", "普通"),
+        "base_horizon": st.session_state.get("result_base_horizon", "特にこだわらない"),
         "purpose": st.session_state.get("result_purpose", ""),
+        "distribution_pref": st.session_state.get("result_distribution_pref", "特にこだわらない"),
+        "style_pref": st.session_state.get("result_style_pref", "特にこだわらない"),
         "horizon": st.session_state.get("result_horizon", "特にこだわらない"),
         "age_range": st.session_state.get("result_age_range", ""),
         "experience": st.session_state.get("result_experience", ""),
         "nisa_pref": st.session_state.get("result_nisa_pref", "特にこだわらない"),
         "fx_tolerance": st.session_state.get("result_fx_tolerance", "特にこだわらない"),
-        "core_satellite_pref": st.session_state.get("result_core_satellite_pref", "特にこだわらない"),
         "cost_pref": st.session_state.get("result_cost_pref", "特にこだわらない"),
         "existing_assets": st.session_state.get("result_existing_assets", []),
         "asset_scale": st.session_state.get("result_asset_scale", "回答しない"),
         "investment_amount": st.session_state.get("result_investment_amount", "回答しない"),
         "region_pref": st.session_state.get("result_region_pref", []),
         "region_avoid": st.session_state.get("result_region_avoid", []),
-        "avoid_tags": st.session_state.get("result_avoid_tags", []),
+        "focus_assets": st.session_state.get("result_focus_assets", []),
         "free_text": st.session_state.get("result_free_text", ""),
         "required_return": (
             solve_required_annual_return(
@@ -2909,8 +2926,9 @@ def reconstruct_hearing_from_session():
 
 # STEP3の「設問ごとのマッチ度」表に表示する判定項目の並び順（優先度の高い順）
 MATCH_CRITERION_ORDER = [
-    "除外条件", "自由記述", "コスト", "コスト（運用期間考慮）", "リスク許容度", "資産集中度",
-    "コア・サテライト", "地域のご意向", "目標利回りとの整合性", "投資目的", "運用期間との整合性", "投資経験", "ご年齢との整合性",
+    "注目する投資対象", "自由記述", "コスト", "コスト（運用期間考慮）", "リスク許容度", "資産集中度",
+    "地域のご意向", "目標利回りとの整合性", "投資目的", "分配方針", "運用スタイルの好み",
+    "運用期間との整合性", "投資経験", "ご年齢との整合性",
     "NISA活用意向", "為替リスク許容度", "保有資産の分散",
 ]
 
@@ -2943,7 +2961,6 @@ def build_selection_policy(hearing):
     戻り値：{"purpose_guidance": str, "priority_list": [str, ...]}"""
     purpose = hearing.get("purpose", "")
     tolerance_raw = hearing.get("tolerance_raw", "普通")
-    core_satellite_pref = hearing.get("core_satellite_pref", "特にこだわらない")
     cost_pref = hearing.get("cost_pref", "特にこだわらない")
     nisa_pref = hearing.get("nisa_pref", "特にこだわらない")
     fx_pref = hearing.get("fx_tolerance", "特にこだわらない")
@@ -2952,7 +2969,9 @@ def build_selection_policy(hearing):
     existing_assets = hearing.get("existing_assets", [])
     region_pref = hearing.get("region_pref", [])
     region_avoid = hearing.get("region_avoid", [])
-    avoid_tags = hearing.get("avoid_tags", [])
+    focus_assets = hearing.get("focus_assets", [])
+    distribution_pref = hearing.get("distribution_pref", "特にこだわらない")
+    style_pref = hearing.get("style_pref", "特にこだわらない")
     free_text = hearing.get("free_text", "").strip()
 
     purpose_guidance = PURPOSE_FUND_GUIDANCE.get(purpose, "")
@@ -2962,26 +2981,25 @@ def build_selection_policy(hearing):
     )
 
     # 優先順位は、score_and_narrow_funds() 内の実際の加減点の大きさに対応させている
-    # （除外意向 > コスト > リスク許容度 > コア・サテライト > 投資目的 > 運用期間×流動性 >
-    #   投資経験 > NISA > 為替 > 保有資産の分散 > 自由記述の肯定的関心事）。
+    # （自由記述の除外意向 > コスト > リスク許容度 > 注目する投資対象・分配方針・投資目的 >
+    #   運用期間×流動性 > 投資経験 > NISA > 為替 > 保有資産の分散 > 自由記述の肯定的関心事）。
     priority_list = []
     free_text_items = analyze_free_text_sentiment(free_text)
     has_negative_free_text = any(item["sentiment"] == "negative" for item in free_text_items)
-    if avoid_tags or has_negative_free_text:
-        detail = []
-        if avoid_tags:
-            detail.append("、".join(avoid_tags))
-        if has_negative_free_text:
-            detail.append("自由記述で示された除外意向")
-        priority_list.append(f"お客様が除外を希望された条件（{'／'.join(detail)}）")
+    if has_negative_free_text:
+        priority_list.append("自由記述で示された除外意向")
     if cost_pref != "特にこだわらない":
         priority_list.append(f"コストに関する考え方：「{cost_pref}」")
     tolerance_label = f"リスク許容度：「{tolerance_raw}」"
     if concentration_level in ("high", "medium"):
         tolerance_label += "（保有資産に対する投資予定額の割合が大きいため、より保守的に判定）"
     priority_list.append(tolerance_label)
-    if core_satellite_pref != "特にこだわらない":
-        priority_list.append(f"コア・サテライト運用の考え方：「{core_satellite_pref}」")
+    if focus_assets:
+        priority_list.append(f"注目する投資対象：「{'、'.join(focus_assets)}」")
+    if distribution_pref != "特にこだわらない":
+        priority_list.append(f"分配方針についてのお考え：「{distribution_pref}」")
+    if style_pref != "特にこだわらない":
+        priority_list.append(f"運用スタイルの好み：「{style_pref}」")
     if region_pref or region_avoid:
         region_detail = []
         if region_pref:
@@ -3252,36 +3270,66 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
             if volatility_spread is not None and volatility_spread >= 50:
                 _apply("投資目的", -2, f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、安定運用を志向する目的にはそぐわない可能性がある点で減点")
         elif "インフレ" in purpose or "資産防衛" in purpose:
-            if any(k in text for k in ["物価連動国債", "REIT", "コモディティ", "オルタナティブ", "不動産投資信託証券"]):
-                _apply("投資目的", 3, f"【投資目的】お客様のご希望「{purpose}」に対し、インフレ局面や株式市場下落時に異なる値動きが期待される実物資産・オルタナティブ資産等を含む商品であるため合致")
+            # ※以前は「物価連動国債・REIT・コモディティ・オルタナティブ」等のキーワード有無で判定していたが、
+            #   これらを一律にインフレ対策商品とみなすのは金融工学的な裏付けが弱く、
+            #   販売トークとしての側面が強いとのご指摘があったため、より説明可能な基準に変更した。
+            #   一般的なインデックスファンドよりも値動きが穏やかな（＝下落局面での資産防衛に資する）
+            #   商品を優先するという、リスク（値ブレ幅）ベースの判定に簡素化している。
+            if volatility_spread is not None:
+                if volatility_spread <= 30:
+                    _apply("投資目的", 2, f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと相対的に小さく、値動きが穏やかな商品であるため合致")
+                elif volatility_spread >= 60:
+                    _apply("投資目的", -2, f"【投資目的】お客様のご希望「{purpose}」に対し、過去5年の値ブレ幅が{volatility_spread}ポイントと大きく、資産防衛を志向する目的にはそぐわない可能性がある点で減点")
+                else:
+                    _apply("投資目的", 0, f"【投資目的】過去5年の値ブレ幅は{volatility_spread}ポイントで、特に有利・不利とは言えない水準です")
             else:
-                _apply("投資目的", 0, "【投資目的】インフレ・資産防衛に資する実物資産・オルタナティブ資産等の記載はありません")
+                _apply("投資目的", 0, "【投資目的】実績データを確認できないため、この観点での加減点は行っていません")
         elif "長期的な資産形成" in purpose:
             if any(k in text for k in ["連動", "インデックス"]):
                 _apply("投資目的", 1, f"【投資目的】お客様のご希望「{purpose}」に対し、指数に連動するインデックス型の商品であり、長期の資産形成に適した透明性・低コスト性を備えているため合致")
             else:
                 _apply("投資目的", 0, "【投資目的】インデックス型・連動型の記載はありません")
 
-        # ⑥.5 コア・サテライト運用の考え方との照合
-        # 定義：サテライト資産＝テーマ型ファンド・新興国株式/債券・REIT・ハイイールド債・ブル/ベア型・オルタナティブ投資等。それ以外はコア資産。
-        core_sat_pref = hearing.get("core_satellite_pref", "特にこだわらない")
-        fund_core_sat = classify_core_satellite(text, fund_name=name)
-        if core_sat_pref.startswith("コア資産（"):
-            if fund_core_sat == "コア資産":
-                _apply("コア・サテライト", 3, "【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドは全世界・先進国・国内株式や伝統的債券等の『コア資産』に分類されるため合致")
+        # ⑥.5 分配方針との照合（旧「投資目的」に混在していた分配軸を独立設問に分離）
+        # ※重要情報シートの文言だけでは、実際の分配実績（値上がり益の積極的な分配等）までは
+        #   判定しきれない限界があるため、あくまで「毎月決算」「毎月分配」「分配重視」等の
+        #   明示的な記載の有無による、参考程度の判定であることに留意。
+        distribution_pref = hearing.get("distribution_pref", "特にこだわらない")
+        is_distribution_fund = any(k in text for k in ["毎月決算", "毎月分配", "分配重視"])
+        if distribution_pref == "利益の一部を受け取りながら投資を続けたい":
+            if is_distribution_fund:
+                _apply("分配方針", 3, f"【分配方針】お客様のご希望「{distribution_pref}」に対し、毎月決算型・分配重視型の商品であるため合致")
             else:
-                _apply("コア・サテライト", -3, "【コア・サテライト】お客様のご希望「コア資産を中心に安定運用したい」に対し、本ファンドはテーマ型・新興国・REIT・ハイイールド債等の『サテライト資産』に分類されるため減点")
-        elif core_sat_pref.startswith("コア資産をベースに"):
-            _apply("コア・サテライト", 0, f"【コア・サテライト】お客様のご希望「コア資産をベースにサテライト資産も一部取り入れたい」に対し、本ファンドは『{fund_core_sat}』に分類されます（コア・サテライト双方をバランス良く組み合わせる観点でご検討ください）")
-        elif core_sat_pref.startswith("サテライト資産も積極的に"):
-            if fund_core_sat == "サテライト資産":
-                _apply("コア・サテライト", 3, "【コア・サテライト】お客様のご希望「サテライト資産も積極的に組み入れ、プラスアルファのリターンを狙いたい」に対し、本ファンドはテーマ型・新興国・REIT等の『サテライト資産』に分類され、積極的なリターン追求のニーズに合致")
+                _apply("分配方針", 0, "【分配方針】毎月決算・分配重視等の明示的な記載はありませんでした")
+        elif distribution_pref == "資産の成長を重視し、分配は極力少ない方がよい":
+            if is_distribution_fund:
+                _apply("分配方針", -2, f"【分配方針】お客様のご希望「{distribution_pref}」に対し、毎月決算型・分配重視型の商品であり、分配を抑えて資産成長を優先したいニーズとは方向性が異なる点で減点")
             else:
-                _apply("コア・サテライト", 0, f"【コア・サテライト】本ファンドは『{fund_core_sat}』に分類されます")
+                _apply("分配方針", 1, f"【分配方針】お客様のご希望「{distribution_pref}」に対し、頻繁な分配を行う旨の記載がないため合致")
         else:
-            _apply("コア・サテライト", 0, f"【コア・サテライト】コア・サテライトについて特にこだわりのご希望はないため、加減点は行っていません（本ファンドは『{fund_core_sat}』に分類されます）")
+            _apply("分配方針", 0, "【分配方針】分配方針について特にこだわりのご希望はないため、加減点は行っていません")
 
-        # ⑥.6 想定運用期間と換金・解約条件（流動性制限）との整合性
+        # ⑥.6 運用スタイルの好み（インデックス型／アクティブ型）との照合
+        style_pref = hearing.get("style_pref", "特にこだわらない")
+        is_index_fund = any(k in text for k in ["連動", "インデックス"])
+        if style_pref == "インデックス型を好む":
+            if is_index_fund:
+                _apply("運用スタイルの好み", 2, f"【運用スタイルの好み】お客様のご希望「{style_pref}」に対し、指数に連動するインデックス型の商品であるため合致")
+            else:
+                _apply("運用スタイルの好み", -1, f"【運用スタイルの好み】お客様のご希望「{style_pref}」に対し、指数連動の記載が見当たらないアクティブ運用型の商品であるため、やや方向性が異なる点で減点")
+        elif style_pref == "アクティブ型を好む":
+            if not is_index_fund:
+                _apply("運用スタイルの好み", 2, f"【運用スタイルの好み】お客様のご希望「{style_pref}」に対し、指数連動ではないアクティブ運用型の商品であるため合致")
+            else:
+                _apply("運用スタイルの好み", -1, f"【運用スタイルの好み】お客様のご希望「{style_pref}」に対し、指数に連動するインデックス型の商品であるため、やや方向性が異なる点で減点")
+        else:
+            _apply("運用スタイルの好み", 0, f"【運用スタイルの好み】運用スタイルについて特にこだわりのご希望はないため、加減点は行っていません（本ファンドは{'インデックス型' if is_index_fund else 'アクティブ型'}と推定されます）")
+
+        # ファンド分類（コア資産／サテライト資産）は、ユーザーからの直接の設問としては廃止したが、
+        # 資産集中度（⑥.11）でのリスク判定には引き続き内部的に利用する。
+        fund_core_sat = classify_core_satellite(text, fund_name=name)
+
+        # ⑥.7 想定運用期間と換金・解約条件（流動性制限）との整合性
         # ※想定運用期間が短いお客様に対し、大口換金の制限や低流動性資産への投資など、
         #   換金・解約に一定の制約がある商品を提案するのは、実務上のミスマッチにつながるため。
         if horizon == "3年未満（短期）":
@@ -3292,7 +3340,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("運用期間との整合性", 0, "【運用期間との整合性】想定運用期間が中期・長期・未設定のため、この観点での加減点は行っていません")
 
-        # ⑥.7 投資経験と想定購入層との照合
+        # ⑥.8 投資経験と想定購入層との照合
         # ※重要情報シートの「商品組成に携わる事業者が想定する購入層」欄に、投資経験者を前提とする
         #   記載がある商品（非上場株式・低流動性資産等）、または複数ファンドを組み合わせる仕組みや
         #   オルタナティブ運用等、構造が複雑な商品を、投資初心者の方に提案するのは適切でないため。
@@ -3307,7 +3355,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("投資経験", 0, f"【投資経験】お客様のご回答「{experience}」は初心者ではないため、この観点での加減点は行っていません")
 
-        # ⑥.8 保有資産の分散（すでに保有している資産クラスへの過度な偏りを避ける）
+        # ⑥.9 保有資産の分散（すでに保有している資産クラスへの過度な偏りを避ける）
         existing_assets_for_diversification = hearing.get("existing_assets", [])
         if existing_assets_for_diversification:
             fund_category_for_diversification = classify_fund_type(text, fund_name=name)
@@ -3327,7 +3375,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("保有資産の分散", 0, "【保有資産の分散】保有金融資産のご回答がないため、この観点での加減点は行っていません")
 
-        # ⑥.9 年齢層との整合性
+        # ⑥.10 年齢層との整合性
         # ・お客様が若い世代の場合：毎月決算・毎月分配型は、長期の複利効果を活かす観点でやや非効率なため減点。
         # ・お客様が高齢の場合：複雑な商品構造、または過去5年の値ブレ幅が大きい（リスクが高い）商品は減点。
         age_range_val = hearing.get("age_range", "")
@@ -3350,7 +3398,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("ご年齢との整合性", 0, "【ご年齢との整合性】特段の留意事項はありません")
 
-        # ⑥.10 資産集中度合いを踏まえたリスク評価
+        # ⑥.11 資産集中度合いを踏まえたリスク評価
         # ※保有金融資産に対して今回の投資予定額の割合が大きい場合、値動きの大きい商品（高リスク・サテライト資産）
         #   への集中投資は、資産全体としての下振れリスクを高めるため、リスク許容度の調整だけでなく、
         #   ここでも明示的に減点し、判定理由として可視化する。
@@ -3365,7 +3413,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("資産集中度", 0, "【資産集中度】保有金融資産・投資予定額のご回答がない、または集中度が低いため、この観点での加減点は行っていません")
 
-        # ⑥.11 投資したい地域・避けたい地域との照合
+        # ⑥.12 投資したい地域・避けたい地域との照合
         # ※ファンド分類（投資対象の分類）が示す地域と、お客様が明示的に「投資したい」「避けたい」とされた
         #   地域を照合する。既存の「除外条件」（新興国・レバレッジ等の5タグ）よりも地域を直接指定できるため、
         #   より柔軟かつ精度の高い絞り込みが可能になる。
@@ -3389,7 +3437,7 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("地域のご意向", 0, "【地域のご意向】投資したい地域・避けたい地域のご指定がないため、加減点は行っていません")
 
-        # ⑥.12 目標金額から逆算した必要利回りとの整合性
+        # ⑥.13 目標金額から逆算した必要利回りとの整合性
         # ※必要利回りは、税金・手数料を考慮しない単純な将来価値計算による参考値であり、
         #   各ファンドの「過去5年平均リターン」も過去の実績にすぎず、将来の成果を保証するものではない。
         #   そのため、ここでの加減点は「目安としての方向性」を示すに留め、断定的な判定は行わない。
@@ -3409,16 +3457,17 @@ def score_and_narrow_funds(fund_list, uploaded_funds, hearing, top_n=5, api_key=
         else:
             _apply("目標利回りとの整合性", 0, "【目標利回りとの整合性】目標金額の設定がないため、加減点は行っていません")
 
-        # ⑦ 除外したい条件（こだわり条件）との照合
-        avoid_tags_hit = False
-        for tag in hearing.get("avoid_tags", []):
-            if tag and tag in text:
-                _apply("除外条件", -5, f"【除外条件】お客様が除外を希望された「{tag}」に該当する記載があるため大幅減点（このファンドは条件に合致しない可能性が高い点にご注意ください）")
-                avoid_tags_hit = True
-        if hearing.get("avoid_tags") and not avoid_tags_hit:
-            _apply("除外条件", 0, "【除外条件】お客様が除外を希望された条件への該当はありませんでした")
-        elif not hearing.get("avoid_tags"):
-            _apply("除外条件", 0, "【除外条件】除外を希望される条件のご指定がないため、加減点は行っていません")
+        # ⑦ 注目する投資対象との照合（該当すれば加点：中村さんのご提案により、除外方式から着目方式に転換）
+        focus_hit = False
+        for tag in hearing.get("focus_assets", []):
+            keywords = FOCUS_ASSET_KEYWORD_MAP.get(tag, [tag])
+            if any(k in text for k in keywords):
+                _apply("注目する投資対象", 4, f"【注目する投資対象】お客様が注目されている「{tag}」に該当する記載があるファンドであるため合致")
+                focus_hit = True
+        if hearing.get("focus_assets") and not focus_hit:
+            _apply("注目する投資対象", 0, "【注目する投資対象】お客様が注目されている投資対象への該当はありませんでした")
+        elif not hearing.get("focus_assets"):
+            _apply("注目する投資対象", 0, "【注目する投資対象】注目する投資対象のご指定がないため、加減点は行っていません")
 
         # ⑧ 自由記述欄のキーワード照合（肯定的な関心事か、除外したい否定的な事柄かを手がかり語から判定）
         positive_matches = [item for item in free_text_items if item["sentiment"] == "positive" and item["keyword"] in text]
@@ -3597,18 +3646,22 @@ def render_admin_content(active_api_key):
   - 長期的な資産形成：インデックス・連動型なら加点
   - ライフイベント資金：換金・解約に制限がある商品は減点／値ブレ幅が小さい商品は加点
   - 老後資金：分配型は加点／値ブレ幅が大きい商品は減点
-  - インカムゲイン重視：毎月決算・分配重視型は加点
-  - インフレ・資産防衛：物価連動国債・REIT・オルタナティブ等は加点
+  - インフレ・資産防衛：過去5年の値ブレ幅が小さい（相対的にローリスクな）商品は加点、大きい商品は減点（※以前は物価連動国債・REIT等のテーマキーワードで判定していたが、金融工学的な裏付けが弱いとのご指摘を踏まえ、より説明可能なリスクベースの判定に変更）
 
-#### ⑥ コア・サテライト運用の考え方
-- **見る項目**：ファンド分類（投資対象の分類）を土台に、テーマ型・新興国・REIT・ハイイールド債・オルタナティブ等を「サテライト資産」、それ以外を「コア資産」と分類。
-- **判定**：ご希望に応じて該当区分を加点、コア中心のご希望時はサテライト資産を減点。
+#### ⑤.5 分配方針についてのお考え
+- **見る項目**：「毎月決算」「毎月分配」「分配重視」等の記載有無。
+- **判定**：「利益の一部を受け取りながら投資を続けたい」→分配型なら加点。「資産の成長を重視し、分配は極力少ない方がよい」→分配型は減点、非分配型は加点。
+- **★留意事項**：重要情報シートの文言だけでは、実際の分配実績（値上がり益の積極的な分配等）までは判定しきれない限界があります。
 
-#### ⑥.5 地域のご意向（投資したい／避けたい地域・国）
+#### ⑤.6 運用スタイルの好み（インデックス型／アクティブ型）
+- **見る項目**：「連動」「インデックス」という語の有無。
+- **判定**：ご希望のスタイルに一致すれば加点、不一致の場合は軽い減点（-1点程度に留め、一方を強く排除しない設計）。
+
+#### ⑥ 地域のご意向（投資したい／避けたい地域・国）
 - **見る項目**：ファンド分類（投資対象の分類）が示す地域区分（米国株式型・全世界株式型・先進国株式型・欧州株式型・インド株式型・中国株式型・新興国株式型・国内株式型）。
 - **判定**：「積極的に投資したい地域」に一致する分類のファンドは加点、「避けたい地域」に一致する分類のファンドは大幅減点。両方とも複数選択可能。
 
-#### ⑥.6 目標利回りとの整合性（任意）
+#### ⑥.5 目標利回りとの整合性（任意）
 - **見る項目**：「目標金額」「一括投資額／毎月積立額」「運用年数」から、税金・手数料を考慮しない単純計算（将来価値の逆算）で必要な年率利回りを算出し、各ファンドの「〔参考〕過去5年間の収益率」の平均値と比較。
 - **判定**：ファンドの過去5年平均リターンが必要利回りを上回れば加点、大きく下回れば減点。
 - **リスク許容度との矛盾チェック**：算出された必要利回りが、申告されたリスク許容度の水準に対して一般的に狙いにくい場合、STEP2画面上に注意喚起を表示（スコアには反映せず、担当者への警告のみ）。
@@ -3617,6 +3670,7 @@ def render_admin_content(active_api_key):
 #### ⑦ 想定運用期間 × 換金・解約条件
 - **見る項目**：「換金・解約の条件」欄の流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）の記載有無。
 - **判定**：想定運用期間が短期（3年未満）の場合、流動性制限がある商品は減点。
+- **★補足**：「基本的な投資スタンス」と「今回のご購入に関する意向」を別設問として分けてお伺いしており、絞り込みの判定には「今回のご購入に関する意向」（リスク許容度・運用期間）を使用します。「基本的な投資スタンス」は解説文の参考情報としてのみ利用します。
 
 #### ⑧ 投資経験 × 想定購入層・商品構造
 - **見る項目**：「商品組成に携わる事業者が想定する購入層」欄の、投資経験者を前提とする記載の有無。また、ファンド・オブ・ファンズ／オルタナティブ／プライベート・エクイティ／ブル・ベア型等、構造が複雑と考えられる商品の有無。
@@ -3630,20 +3684,20 @@ def render_admin_content(active_api_key):
 - **見る項目**：毎月決算・毎月分配型の有無、商品構造の複雑さ、過去5年の値ブレ幅。
 - **判定**：ご年齢が若い（20代以下）場合、毎月決算・毎月分配型は複利効率の観点で減点。ご年齢が高い（60歳以上）場合、複雑な商品構造、または値ブレ幅が大きい（リスクが高い）商品は減点。
 
-#### ⑪ 除外したい条件
-- **見る項目**：本文全体でのキーワード（新興国・レバレッジ・ハイイールド・テクノロジー・脱炭素）の有無。
-- **判定**：該当する場合は大幅減点。
+#### ⑪ 注目する投資対象
+- **見る項目**：本文全体でのキーワード（ハイイールド・新興国・小型成長株・コモディティ（金）・テクノロジー・バイオ・資源・レバレッジ・オルタナティブ）の有無。
+- **判定**：該当する場合は加点（※以前は「除外したい条件」として不一致時に減点する設計でしたが、ポジティブな設問の方が実務的との意見を踏まえ、着目方式に転換しました）。
 
 #### ⑫ 自由記述欄
 - **見る項目**：自由記述の全文。
 - **判定**：AI（Gemini）が文脈からトピックと肯定的／否定的なニュアンスを判定。「保有している」等の記述は否定的（除外）として扱う。AIが利用できない場合は簡易なキーワード判定にフォールバック。
 
 #### ⑬ 資産集中度合いを踏まえたリスク評価
-- **見る項目**：保有金融資産の規模目安と、今回の投資予定額の比率。過去5年の値ブレ幅、コア・サテライトの分類。
+- **見る項目**：保有金融資産の規模目安と、今回の投資予定額の比率。過去5年の値ブレ幅、ファンド分類（内部的なコア／サテライト判定）。
 - **判定**：投資予定額の比率が高い（概ね資産の3割以上、特に5割以上）場合、値ブレ幅が大きい、またはサテライト資産に分類される商品は明確に減点。①のリスク許容度の判定自体も、この比率に応じて一段階保守的に補正されます。
 
 ---
-※ファンド分類（コア／サテライトの土台）は、「全世界株式型」「米国株式型」「欧州株式型」「先進国株式型」「インド株式型」「中国株式型」「新興国株式型」「国内株式型」「テーマ型株式（脱炭素・テクノロジー等）」「不動産投資型（REIT）」「バランス型（複合資産）」「債券型」のいずれかに、ファンド名・本文のキーワードから判定しています。
+※ファンド分類は、「全世界株式型」「米国株式型」「欧州株式型」「先進国株式型」「インド株式型」「中国株式型」「新興国株式型」「国内株式型」「テーマ型株式（脱炭素・テクノロジー等）」「不動産投資型（REIT）」「バランス型（複合資産）」「債券型」のいずれかに、ファンド名・本文のキーワードから判定しています。このうちテーマ型・新興国・REIT・ハイイールド債・オルタナティブ等は「サテライト資産」として、⑬の資産集中度リスク判定に内部的に利用しています（ユーザー向けの設問としては廃止済み）。
 
 ※STEP3の結果画面では、上記①〜⑬の各判定項目について、◎（非常に合致）〜×（不一致）の5段階記号でファンドごとのマッチ度を一覧表示し、最終行に実際の総合点（スコア合計）を表示します。「絞り込みを行う」を選択しなかった場合も、手動選択したファンドについて同じロジックで判定し、特にアンマッチだった項目を明示します。
         """)
@@ -3818,20 +3872,52 @@ def render_selection_content(active_api_key):
             index=0,
             key="result_experience"
         )
+
+        st.markdown("##### 🧭 基本的な投資スタンス（ふだんのお考え）")
+        st.caption("💡 ふだんの基本的な投資に対する考え方と、今回の購入についての意向が異なる場合があります（例：ふだんは長期・安定志向だが、今回だけ話題のテーマ型ファンドを試したい　等）。両方を分けてお伺いします。")
+        base_tolerance = st.selectbox(
+            "ふだんの基本的なリスク許容度：",
+            options=[
+                "非常に低い（元本毀損を極力避けたい・徹底したローリスク）",
+                "低い（多少の変動は許容・ややローリスク）",
+                "普通（標準的な市場の値動きをバランス良く許容・ミドルリスク）",
+                "高い（中長期的な収益重視で一時的な大きな下落も許容・ハイリスク）",
+                "非常に高い（短期的な元本損害を覚悟し限界までリターンを狙う・超ハイリスク）"
+            ],
+            index=2,
+            key="result_base_tolerance"
+        )
+        base_horizon = st.selectbox(
+            "ふだんの基本的な運用期間の考え方：",
+            options=["3年未満（短期）", "3〜10年（中期）", "10年超（長期）", "特にこだわらない"],
+            index=3,
+            key="result_base_horizon"
+        )
+
+        st.markdown("##### 🎯 今回のご購入に関する意向")
         purpose = st.selectbox(
             "お客様の投資目的：",
             options=[
                 "長期的な資産形成（つみたて運用等による将来への着実な備え）",
                 "直近のライフイベント資金（住宅、教育等に向けた計画的な確保）",
                 "老後資金の確保・資産寿命の延伸（引き出しに耐えうる安定運用）",
-                "定期的な利回り（インカムゲイン）の最大化・分配重視",
                 "インフレ・市場下落リスクに対するポートフォリオ資産防衛"
             ],
             index=0,
             key="result_purpose"
         )
+        distribution_pref = st.selectbox(
+            "ファンドの分配方針についてのお考え：",
+            options=[
+                "資産の成長を重視し、分配は極力少ない方がよい",
+                "利益の一部を受け取りながら投資を続けたい",
+                "特にこだわらない",
+            ],
+            index=2,
+            key="result_distribution_pref"
+        )
         tolerance = st.selectbox(
-            "お客様のリスク許容度：",
+            "今回のご購入における具体的なリスク許容度：",
             options=[
                 "非常に低い（元本毀損を極力避けたい・徹底したローリスク）",
                 "低い（多少の変動は許容・ややローリスク）",
@@ -3845,10 +3931,16 @@ def render_selection_content(active_api_key):
 
         st.markdown("##### 📋 お客様の属性プロフィール（追加項目・任意）")
         horizon = st.selectbox(
-            "想定運用期間：",
+            "今回のご購入における具体的な運用期間：",
             options=["3年未満（短期）", "3〜10年（中期）", "10年超（長期）", "特にこだわらない"],
             index=3,
             key="result_horizon"
+        )
+        style_pref = st.selectbox(
+            "運用スタイルの好み：",
+            options=["インデックス型を好む", "アクティブ型を好む", "特にこだわらない"],
+            index=2,
+            key="result_style_pref"
         )
         fx_tolerance = st.selectbox(
             "為替リスクの許容度：",
@@ -3886,17 +3978,6 @@ def render_selection_content(active_api_key):
             key="result_investment_amount"
         )
         st.caption("💡 保有金融資産に対して今回の投資予定額の割合が大きい場合、資産が特定の商品に集中するリスクを踏まえ、リスク許容度をやや抑えた候補選定を行います。")
-        core_satellite_pref = st.selectbox(
-            "コア・サテライト運用の考え方：",
-            options=[
-                "コア資産（全世界株式・先進国株式・国内株式・伝統的債券等）を中心に安定運用したい",
-                "コア資産をベースに、サテライト資産（テーマ型・新興国・REIT・ハイイールド債・オルタナティブ等）も一部取り入れたい",
-                "サテライト資産も積極的に組み入れ、プラスアルファのリターンを狙いたい",
-                "特にこだわらない",
-            ],
-            index=3,
-            key="result_core_satellite_pref"
-        )
         cost_pref = st.selectbox(
             "コストに関する考え方：",
             options=[
@@ -3922,12 +4003,12 @@ def render_selection_content(active_api_key):
             placeholder="選択してください（複数選択可）",
             key="result_region_avoid"
         )
-        avoid_tags = st.multiselect(
-            "除外したい条件（該当するものがあれば選択）：",
-            options=["新興国", "レバレッジ", "ハイイールド", "テクノロジー", "脱炭素"],
+        focus_assets = st.multiselect(
+            "注目する投資対象は？（該当するものがあれば選択）：",
+            options=["ハイイールド", "新興国", "小型成長株", "コモディティ（金）", "テクノロジー", "バイオ", "資源", "レバレッジ", "オルタナティブ"],
             default=[],
             placeholder="選択してください（複数選択可）",
-            key="result_avoid_tags"
+            key="result_focus_assets"
         )
 
         st.markdown("---")
@@ -4075,20 +4156,23 @@ def render_selection_content(active_api_key):
                 "高い" if ("高い" in tolerance) else "普通"
             ),
             "tolerance_raw": tolerance,
+            "base_tolerance_raw": base_tolerance,
+            "base_horizon": base_horizon,
             "purpose": purpose,
+            "distribution_pref": distribution_pref,
+            "style_pref": style_pref,
             "horizon": horizon,
             "age_range": age_range,
             "experience": experience,
             "nisa_pref": nisa_pref,
             "fx_tolerance": fx_tolerance,
-            "core_satellite_pref": core_satellite_pref,
             "cost_pref": cost_pref,
             "existing_assets": existing_assets,
             "asset_scale": asset_scale,
             "investment_amount": investment_amount,
             "region_pref": region_pref,
             "region_avoid": region_avoid,
-            "avoid_tags": avoid_tags,
+            "focus_assets": focus_assets,
             "free_text": free_text,
             "required_return": required_return,
         }
@@ -4305,35 +4389,44 @@ def render_result_page():
     if "顧客" in target_type:
         age_val = st.session_state.get("result_age_range", "30代〜40代")
         exp_val = st.session_state.get("result_experience", "初心者")
+        base_tol_val = st.session_state.get("result_base_tolerance", "普通")
+        base_horizon_val = st.session_state.get("result_base_horizon", "特にこだわらない")
         purp_val = st.session_state.get("result_purpose", "長期資産形成")
+        distribution_val = st.session_state.get("result_distribution_pref", "特にこだわらない")
+        style_val = st.session_state.get("result_style_pref", "特にこだわらない")
         tol_val = st.session_state.get("result_tolerance", "普通")
         horizon_val = st.session_state.get("result_horizon", "特にこだわらない")
         fx_val = st.session_state.get("result_fx_tolerance", "特にこだわらない")
         nisa_val = st.session_state.get("result_nisa_pref", "特にこだわらない")
-        core_sat_val = st.session_state.get("result_core_satellite_pref", "特にこだわらない")
         cost_val = st.session_state.get("result_cost_pref", "特にこだわらない")
         assets_val = st.session_state.get("result_existing_assets", [])
         scale_val = st.session_state.get("result_asset_scale", "回答しない")
         invest_amount_val = st.session_state.get("result_investment_amount", "回答しない")
         region_pref_val = st.session_state.get("result_region_pref", [])
         region_avoid_val = st.session_state.get("result_region_avoid", [])
-        avoid_val = st.session_state.get("result_avoid_tags", [])
+        focus_assets_val = st.session_state.get("result_focus_assets", [])
         free_text_val = st.session_state.get("result_free_text", "").strip()
 
         summary_items = [
             f"年齢: {age_val}",
             f"投資経験: {exp_val}",
             f"目的: {purp_val}",
-            f"リスク許容度: {tol_val}",
+            f"リスク許容度（今回）: {tol_val}",
         ]
+        if base_tol_val != tol_val:
+            summary_items.append(f"リスク許容度（基本スタンス）: {base_tol_val}")
+        if base_horizon_val != "特にこだわらない":
+            summary_items.append(f"運用期間（基本スタンス）: {base_horizon_val}")
         if horizon_val != "特にこだわらない":
-            summary_items.append(f"運用期間: {horizon_val}")
+            summary_items.append(f"運用期間（今回）: {horizon_val}")
+        if distribution_val != "特にこだわらない":
+            summary_items.append(f"分配方針: {distribution_val}")
+        if style_val != "特にこだわらない":
+            summary_items.append(f"運用スタイルの好み: {style_val}")
         if fx_val != "特にこだわらない":
             summary_items.append(f"為替許容度: {fx_val}")
         if nisa_val != "特にこだわらない":
             summary_items.append(f"NISA意向: {nisa_val}")
-        if core_sat_val != "特にこだわらない":
-            summary_items.append(f"コア・サテライト: {core_sat_val}")
         if cost_val != "特にこだわらない":
             summary_items.append(f"コスト方針: {cost_val}")
         if assets_val:
@@ -4355,8 +4448,8 @@ def render_result_page():
             )
             if _req_ret is not None:
                 summary_items.append(f"目標必要利回り: 約{_req_ret}%（参考値）")
-        if avoid_val:
-            summary_items.append(f"除外条件: {'、'.join(avoid_val)}")
+        if focus_assets_val:
+            summary_items.append(f"注目する投資対象: {'、'.join(focus_assets_val)}")
         if free_text_val:
             summary_items.append(f"自由記述: {free_text_val}")
 
@@ -4734,16 +4827,19 @@ def render_result_page():
         target_persona_instruction = ""
         selected_age = st.session_state.get("result_age_range", "30代〜40代")
         selected_experience = st.session_state.get("result_experience", "初心者")
+        selected_base_tolerance = st.session_state.get("result_base_tolerance", "普通")
+        selected_base_horizon = st.session_state.get("result_base_horizon", "特にこだわらない")
         selected_purpose = st.session_state.get("result_purpose", "長期資産形成")
+        selected_distribution_pref = st.session_state.get("result_distribution_pref", "特にこだわらない")
+        selected_style_pref = st.session_state.get("result_style_pref", "特にこだわらない")
         selected_tolerance = st.session_state.get("result_tolerance", "普通")
         selected_horizon = st.session_state.get("result_horizon", "特にこだわらない")
         selected_fx = st.session_state.get("result_fx_tolerance", "特にこだわらない")
         selected_nisa_pref = st.session_state.get("result_nisa_pref", "特にこだわらない")
-        selected_core_satellite_pref = st.session_state.get("result_core_satellite_pref", "特にこだわらない")
         selected_cost_pref = st.session_state.get("result_cost_pref", "特にこだわらない")
         selected_region_pref = st.session_state.get("result_region_pref", [])
         selected_region_avoid = st.session_state.get("result_region_avoid", [])
-        selected_avoid_tags = st.session_state.get("result_avoid_tags", [])
+        selected_focus_assets = st.session_state.get("result_focus_assets", [])
         selected_existing_assets = st.session_state.get("result_existing_assets", [])
         selected_asset_scale = st.session_state.get("result_asset_scale", "回答しない")
         selected_free_text = st.session_state.get("result_free_text", "").strip()
@@ -4767,14 +4863,20 @@ def render_result_page():
                 exp_detail = "投資経験が極めて豊富で上級者レベルです。ポートフォリオ全体への相関効果、アセットクラス特有 of ベータ値やシャープレシオなどの金融工学的なデータも交え、緻密で高度なロジカル分散投資分析を提供してください。"
 
             extra_profile_lines = []
+            if selected_base_tolerance and selected_base_tolerance != selected_tolerance:
+                extra_profile_lines.append(f"・ふだんの基本的なリスク許容度：{selected_base_tolerance}（今回のご購入については別途下記の通り）")
+            if selected_base_horizon != "特にこだわらない":
+                extra_profile_lines.append(f"・ふだんの基本的な運用期間の考え方：{selected_base_horizon}")
             if selected_horizon != "特にこだわらない":
-                extra_profile_lines.append(f"・想定運用期間：{selected_horizon}")
+                extra_profile_lines.append(f"・今回のご購入における想定運用期間：{selected_horizon}")
+            if selected_distribution_pref != "特にこだわらない":
+                extra_profile_lines.append(f"・分配方針についてのお考え：{selected_distribution_pref}")
+            if selected_style_pref != "特にこだわらない":
+                extra_profile_lines.append(f"・運用スタイルの好み：{selected_style_pref}")
             if selected_fx != "特にこだわらない":
                 extra_profile_lines.append(f"・為替リスクの許容度：{selected_fx}")
             if selected_nisa_pref != "特にこだわらない":
                 extra_profile_lines.append(f"・NISA活用の意向：{selected_nisa_pref}")
-            if selected_core_satellite_pref != "特にこだわらない":
-                extra_profile_lines.append(f"・コア・サテライト運用の考え方：{selected_core_satellite_pref}")
             if selected_cost_pref != "特にこだわらない":
                 extra_profile_lines.append(f"・コストに関する考え方：{selected_cost_pref}")
             if selected_existing_assets:
@@ -4785,8 +4887,8 @@ def render_result_page():
                 extra_profile_lines.append(f"・積極的に投資したい地域・国：{'、'.join(selected_region_pref)}")
             if selected_region_avoid:
                 extra_profile_lines.append(f"・避けたい地域・国：{'、'.join(selected_region_avoid)}")
-            if selected_avoid_tags:
-                extra_profile_lines.append(f"・除外を希望する条件：{'、'.join(selected_avoid_tags)}")
+            if selected_focus_assets:
+                extra_profile_lines.append(f"・注目する投資対象：{'、'.join(selected_focus_assets)}")
             if selected_free_text:
                 extra_profile_lines.append(f"・その他の自由記述（担当者からの補足情報）：{selected_free_text}")
             extra_profile_text = ("\n" + "\n".join(extra_profile_lines)) if extra_profile_lines else ""
@@ -4804,15 +4906,8 @@ def render_result_page():
 ・特にお客様の年齢層（若年層であれば長期投資の複利メリット、シニア層であれば流動性の確保や取り崩しフェーズへの適応など）に考慮し、投資期間を想定した最適なアプローチをアドバイスに含めてください。
 ・お客様の「投資目的」と照らし合わせ、今回の各ファンドが資産形成の目標達成にどう機能するのか（あるいはどのような点で注意が必要か）を丁寧に整理してください。
 ・お客様の「リスク許容度」と照らし合わせて、5年の実績最低・最高値から想定されるボラティリティ（ブレ幅）が、このお客様の許容範囲内に収まるアセットバランスなのかを論理的かつ誠実に分析・解説してください。
-・上記の追加項目（運用期間・為替許容度・NISA意向・コア・サテライト運用の考え方・コストに関する考え方・除外条件・自由記述）が設定されている場合は、それらの内容も踏まえて整合性のとれた解説をしてください。ただし、記載のない前提を勝手に補って断定しないでください。
+・上記の追加項目（運用期間・為替許容度・NISA意向・コストに関する考え方・注目する投資対象・自由記述）が設定されている場合は、それらの内容も踏まえて整合性のとれた解説をしてください。ただし、記載のない前提を勝手に補って断定しないでください。
 ・「魅力的」などの売り込み・押し売り表現は徹底的に排除し、お客様が主体的に賢い判断を下せるよう、中立的かつ客観的なファクトベース of 道標となる説明に徹してください。
-
-【コア・サテライト運用の考え方（分類定義）】
-各ファンドを比較・解説する際は、以下の定義に基づいて「コア資産」「サテライト資産」のいずれに該当するかを踏まえて説明してください（この定義は絞り込み機能で使用しているものと同一です。表記も統一してください）。
-・サテライト資産：テーマ型ファンド（脱炭素・テクノロジー・サイバーセキュリティ・インパクト投資等）、新興国株式・債券、REIT（不動産投資信託証券）、ハイ・イールド債、ブル・ベア型、オルタナティブ投資（コモディティ・ヘッジファンド等）
-・コア資産：上記に該当しない、全世界株式・先進国株式・国内株式インデックスや伝統的な債券等の基本的な資産クラス
-・お客様が「コア・サテライト運用の考え方」を選択されている場合は、比較対象ファンドがそれぞれコア資産・サテライト資産のどちらに該当するかを明示し、お客様のご希望（安定重視でコア中心か、プラスアルファを狙いサテライトも組み入れるか）との整合性を具体的に解説してください。
-・断定的な配分比率の推奨（「コア○％・サテライト○％にすべき」等）は避け、あくまで各ファンドの位置づけの説明と、お客様の意向との整合性の解説に留めてください。
 
 【コストの解説における運用期間の考慮（超重要）】
 信託報酬（運用管理費用）は保有期間に比例して累積する「継続的なコスト」であるのに対し、購入時手数料は保有期間によらず一度だけ発生する「一時的なコスト」です。この性質の違いを踏まえずに、想定運用期間を無視して信託報酬の高低だけを強調する解説は、実態に即さない誤解を招くため避けてください。
