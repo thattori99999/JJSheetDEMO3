@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r48（コア・サテライト設問廃止、投資目的を分配方針と分離、インフレ対策ロジックをリスクベースに簡素化、除外条件→注目する投資対象へ転換、運用スタイルの好み・基本スタンス/今回意向の分離設問を追加）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r49（STEP3に表・レポート内容を質問できるスコープ制限つきチャット機能を追加。STEP2の比較方法選択がページ遷移で消える不具合を修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2762,6 +2762,98 @@ def get_cached_free_text_items(free_text, api_key):
     items = interpret_free_text_via_ai(free_text, api_key)
     st.session_state.free_text_interpretation_cache = {"text": free_text, "items": items}
     return items
+
+
+def build_chat_context_text(hearing, match_results, generated_explanation, selected_funds, uploaded_funds):
+    """STEP3の質問チャット機能に渡す「現在表示されている内容」のコンテキストを構築する。
+    ※チャットAIの回答は、必ずこのコンテキストの範囲内にとどめるようプロンプト側で厳格に制約する。"""
+    lines = []
+
+    lines.append("【お客様のヒアリング内容】")
+    hearing_label_map = [
+        ("tolerance_raw", "今回のリスク許容度"), ("purpose", "投資目的"),
+        ("distribution_pref", "分配方針"), ("style_pref", "運用スタイルの好み"),
+        ("horizon", "今回の運用期間"), ("fx_tolerance", "為替リスク許容度"),
+        ("nisa_pref", "NISA活用意向"), ("cost_pref", "コストに関する考え方"),
+        ("region_pref", "投資したい地域"), ("region_avoid", "避けたい地域"),
+        ("focus_assets", "注目する投資対象"), ("free_text", "自由記述"),
+    ]
+    for key, label in hearing_label_map:
+        val = hearing.get(key)
+        if val and val != "特にこだわらない":
+            val_str = "、".join(val) if isinstance(val, list) else str(val)
+            lines.append(f"・{label}：{val_str}")
+
+    lines.append("\n【各候補ファンドのマッチ度スコア内訳（判定項目ごとの加減点）】")
+    for r in match_results:
+        lines.append(f"◆{r['fund']}（総合スコア：{r['score']:+.1f}点）")
+        for b in r.get("breakdown", []):
+            if abs(b["delta"]) >= 1:
+                lines.append(f"　- {b['criterion']}：{b['delta']:+.1f}点／{b['detail']}")
+
+    lines.append("\n【候補ファンドの重要情報シート原文（一部抜粋）】")
+    for name in selected_funds:
+        data = uploaded_funds.get(name, {})
+        text = data.get("text", "") if isinstance(data, dict) else str(data)
+        lines.append(f"◆{name}\n{text[:1200]}")
+
+    if generated_explanation:
+        lines.append("\n【AIが生成した詳細解説レポートの内容】")
+        try:
+            lines.append(json.dumps(generated_explanation, ensure_ascii=False, indent=None)[:4000])
+        except (TypeError, ValueError):
+            lines.append(str(generated_explanation)[:4000])
+
+    return "\n".join(lines)
+
+
+def answer_report_question(question, chat_history, context_text, api_key):
+    """STEP3に表示されているマッチ度表・スコア内訳・レポートの内容について、担当者からの質問に回答する。
+    ※これは新たな投資助言や商品推奨を行う機能ではなく、あくまで「既に表示されている情報の説明員」として
+    厳格にスコープを限定している（プロンプト側で明示的に制約）。"""
+    if not api_key:
+        return "現在AI機能を利用できません（APIキーが設定されていません）。STEP1でAPIキーをご確認ください。"
+
+    system_prompt = f"""あなたは、投資信託の比較ツール「STEP3：比較結果画面」に表示されている内容について、
+利用者（金融機関の担当者）からの質問に答える「説明員」です。以下の制約を厳守してください。
+
+【厳守事項】
+1. 回答は、以下に提供する「表示中のデータ」の範囲内でのみ行ってください。これらのデータに基づかない
+   一般的な金融知識や、学習済みの情報からの推測での回答は行わないでください。
+2. 表示されている候補ファンド以外のファンドを新たに提案・言及しないでください。
+3. 「結局どれを買えばよいか」「おすすめは？」といった、新たな投資判断を求める質問に対しては、
+   特定の商品を断定的に推奨するのではなく、表内のどの項目がどのように影響しているかを客観的に
+   説明するにとどめてください（例：「Aファンドが最上位なのは、コストの項目で+4点、リスク許容度の
+   項目で+3点加点されているためです」等）。
+4. 将来の運用成果について、断定的な予測や保証をする発言は一切行わないでください。過去の実績は
+   将来の成果を保証するものではない旨を、関連する質問の際には付言してください。
+5. これは投資助言ではなく、既に表示されている情報の説明に過ぎない旨を、必要に応じて明確にしてください。
+6. 表示中のデータに答えがない質問には、正直に「表示されている情報からは判断できません」と回答してください。
+7. 回答は簡潔に、担当者がすぐに理解・活用できる分かりやすい言葉で行ってください。
+
+【表示中のデータ】
+{context_text}
+"""
+
+    contents = []
+    for turn in chat_history:
+        role = "user" if turn["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [turn["content"]]})
+    contents.append({"role": "user", "parts": [question]})
+
+    for attempt in range(3):
+        try:
+            genai.configure(api_key=api_key)
+            target_model = get_safe_model_name(api_key)
+            model = genai.GenerativeModel(target_model, system_instruction=system_prompt)
+            response = model.generate_content(contents)
+            return response.text.strip()
+        except exceptions.ResourceExhausted:
+            time.sleep((attempt + 1) * 3)
+            continue
+        except Exception:
+            return "申し訳ございません、回答の生成中にエラーが発生しました。時間をおいて再度お試しください。"
+    return "申し訳ございません、アクセスが集中している可能性があります。しばらく時間をおいて再度お試しください。"
 
 
 # --- 🗂️ ファンド分類（投資対象の分類）の判定（AIを使わない、キーワードベースの決定的分類） ---
@@ -4073,15 +4165,26 @@ def render_selection_content(active_api_key):
     # --- 🗂️ 比較方法の選択（自分で選ぶ／AIロボに絞り込んでもらう） ---
     st.markdown("---")
     st.markdown("<div class='form-title'>🗂️ 比較方法の選択</div>", unsafe_allow_html=True)
+    # ※ st.radio はウィジェットとして描画されなかった回（例：STEP3を閲覧している間）が続くと、
+    #   Streamlit側でそのキーの値が破棄されてしまうことがある。これにより、STEP2に戻った際に
+    #   「AIロボに絞り込んでもらう」を選んでいたはずが「自分で選ぶ」に静かに戻ってしまい、
+    #   実際にはまだ残っている絞り込み結果が表示されなくなる不具合があった。
+    #   ウィジェット専用のキーとは別に、恒久的な保持用のキー(comparison_mode_persistent)へ
+    #   都度コピーすることで、ページ間を移動しても選択内容が保持されるようにする
+    #   （show_comparison_table と同じ対処パターン）。
+    comparison_mode_options = [
+        "🗂️ 比較したいファンドを自分で選ぶ（従来通り）",
+        "🎯 お客様の属性から、AIロボに候補ファンドを絞り込んでもらう"
+    ]
+    _persisted_mode = st.session_state.get("comparison_mode_persistent", comparison_mode_options[0])
+    _default_mode_index = comparison_mode_options.index(_persisted_mode) if _persisted_mode in comparison_mode_options else 0
     comparison_mode = st.radio(
         "比較方法をお選びください：",
-        options=[
-            "🗂️ 比較したいファンドを自分で選ぶ（従来通り）",
-            "🎯 お客様の属性から、AIロボに候補ファンドを絞り込んでもらう"
-        ],
-        index=0,
-        key="comparison_mode"
+        options=comparison_mode_options,
+        index=_default_mode_index,
+        key="comparison_mode_widget"
     )
+    st.session_state.comparison_mode_persistent = comparison_mode
     is_narrowing_mode = "絞り込んでもらう" in comparison_mode
 
     current_choices = []
@@ -4382,6 +4485,8 @@ def render_result_page():
     if sorted(st.session_state.last_selected_funds) != current_selected:
         st.session_state.generated_explanation = ""
         st.session_state.last_selected_funds = current_selected
+        # 選択ファンドが変わった場合は、古い候補についてのチャット履歴を持ち越さないようリセットする
+        st.session_state.step3_chat_history = []
 
     # 選択画面から引き継がれた現在の設定値を上部にサマライズ表示
     target_type = st.session_state.get("result_target_type", "顧客（お客様ご自身への直接説明）向け")
@@ -4469,7 +4574,7 @@ def render_result_page():
     #   ヒアリング内容を変更した場合は、下の「🔄 最新のヒアリング内容で再計算する」ボタンで
     #   明示的に反映できるようにしている。
     hearing_for_match = reconstruct_hearing_from_session()
-    is_narrowing_mode_used = "絞り込んでもらう" in st.session_state.get("comparison_mode", "")
+    is_narrowing_mode_used = "絞り込んでもらう" in st.session_state.get("comparison_mode_persistent", "")
 
     funds_key = tuple(sorted(st.session_state.selected_funds))
     cached_match = st.session_state.get("match_table_cache")
@@ -4947,6 +5052,40 @@ def render_result_page():
         render_analysis_report(st.session_state.generated_explanation, st.session_state.selected_funds)
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- 💬 表やレポートの内容について質問できるチャット機能 ---
+    # ※このチャットは、既に表示されているマッチ度表・スコア内訳・レポートの内容の「説明員」であり、
+    #   新たな商品推奨・候補外ファンドへの言及・将来の運用成果の予測は行わないよう、
+    #   answer_report_question() 内のプロンプトで厳格にスコープを制限している。
+    if st.session_state.get("generated_explanation"):
+        st.markdown("---")
+        st.markdown("<div class='form-title' style='font-size:24px;'>💬 表やレポートの内容について質問する</div>", unsafe_allow_html=True)
+        st.caption("※この回答は、既に表示されている比較結果・スコア内訳・レポートの内容を説明するものであり、新たな商品の推奨や、投資助言、将来の運用成果の予測を行うものではありません。")
+
+        if "step3_chat_history" not in st.session_state:
+            st.session_state.step3_chat_history = []
+
+        for turn in st.session_state.step3_chat_history:
+            with st.chat_message(turn["role"]):
+                st.markdown(turn["content"])
+
+        user_question = st.chat_input("表やレポートの内容について質問する（例：なぜこのファンドが1位ですか？／信託報酬を比較して）")
+        if user_question:
+            st.session_state.step3_chat_history.append({"role": "user", "content": user_question})
+            with st.chat_message("user"):
+                st.markdown(user_question)
+
+            chat_context_text = build_chat_context_text(
+                hearing_for_match, match_results, st.session_state.get("generated_explanation"),
+                st.session_state.selected_funds, st.session_state.uploaded_funds
+            )
+            with st.chat_message("assistant"):
+                with st.spinner("回答を作成しています..."):
+                    answer = answer_report_question(
+                        user_question, st.session_state.step3_chat_history[:-1], chat_context_text, active_api_key
+                    )
+                st.markdown(answer)
+            st.session_state.step3_chat_history.append({"role": "assistant", "content": answer})
 
 
 # --- 7. アプリケーションのメインエントリーロジック ---
