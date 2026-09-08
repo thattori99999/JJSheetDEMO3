@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r51（ファンド選択の状態復元をさらに強化：モード切替時も全ファンド分のチェックボックス状態を事前復元）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r52（絞り込み結果のチェック未反映バグを修正、ヒアリング全項目をページ遷移後も保持する永続化ラッパーを導入）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2763,6 +2763,56 @@ def ensure_fund_checkbox_state(fund_list, key_prefix):
             st.session_state[key] = fund_name in st.session_state.selected_funds
 
 
+# --- 🧷 ヒアリングウィジェット用の「状態保持」ラッパー群 ---
+# ※Streamlitは、あるウィジェットが特定のスクリプト実行（画面描画）で呼び出されないと、
+#   そのウィジェットの内部状態（session_state内の値）を破棄してしまうことがある。
+#   STEP2のヒアリング項目はSTEP3・STEP1を閲覧している間は一切描画されないため、
+#   何も対策しないと、STEP2に戻ってきた際にすべての回答が既定値にリセットされてしまう。
+#   ウィジェット専用のキーとは別に「__persist」サフィックス付きの恒久的な保持用キーへ
+#   都度コピーしておき、ウィジェットの内部状態が失われた場合はそこから復元することで、
+#   画面遷移をまたいでも入力内容が保持されるようにする。
+def persistent_selectbox(label, options, default_index, key, **kwargs):
+    persist_key = f"{key}__persist"
+    persisted_value = st.session_state.get(persist_key, options[default_index])
+    idx = options.index(persisted_value) if persisted_value in options else default_index
+    value = st.selectbox(label, options=options, index=idx, key=key, **kwargs)
+    st.session_state[persist_key] = value
+    return value
+
+
+def persistent_multiselect(label, options, key, default=None, **kwargs):
+    persist_key = f"{key}__persist"
+    persisted_value = st.session_state.get(persist_key, default or [])
+    persisted_value = [v for v in persisted_value if v in options]  # 選択肢の変更に対する安全策
+    value = st.multiselect(label, options=options, default=persisted_value, key=key, **kwargs)
+    st.session_state[persist_key] = value
+    return value
+
+
+def persistent_text_area(label, key, default="", **kwargs):
+    persist_key = f"{key}__persist"
+    persisted_value = st.session_state.get(persist_key, default)
+    value = st.text_area(label, value=persisted_value, key=key, **kwargs)
+    st.session_state[persist_key] = value
+    return value
+
+
+def persistent_checkbox(label, key, default=False, **kwargs):
+    persist_key = f"{key}__persist"
+    persisted_value = st.session_state.get(persist_key, default)
+    value = st.checkbox(label, value=persisted_value, key=key, **kwargs)
+    st.session_state[persist_key] = value
+    return value
+
+
+def persistent_number_input(label, key, default_value, **kwargs):
+    persist_key = f"{key}__persist"
+    persisted_value = st.session_state.get(persist_key, default_value)
+    value = st.number_input(label, value=persisted_value, key=key, **kwargs)
+    st.session_state[persist_key] = value
+    return value
+
+
 def get_cached_free_text_items(free_text, api_key):
     """自由記述欄のAIによる解釈結果を、同じ自由記述の内容である限りセッション内で再利用する。
     ※AI（Gemini）の応答は、同一の入力・同一のプロンプトであっても呼び出しごとに多少ゆらぐことがある。
@@ -2989,41 +3039,52 @@ PURPOSE_FUND_GUIDANCE = {
 }
 
 
+def _get_persisted(key, default):
+    """ウィジェットのパージに影響されない恒久保持用キー（__persist）を優先して読み取る。
+    まだ一度もそのウィジェットが描画されていないセッションでは __persist が存在しないため、
+    ウィジェット本体のキー、それも無ければ既定値の順にフォールバックする。"""
+    if f"{key}__persist" in st.session_state:
+        return st.session_state[f"{key}__persist"]
+    return st.session_state.get(key, default)
+
+
 def reconstruct_hearing_from_session():
     """STEP2の各ウィジェットで session_state に保存された回答から、
     score_and_narrow_funds() が要求する hearing 辞書を再構築する。
     STEP3（結果画面）で、絞り込みモードを使わなかった場合でも
-    同じ判定ロジックでマッチ度を計算できるようにするためのもの。"""
-    tolerance = st.session_state.get("result_tolerance", "普通（標準的な市場の値動きをバランス良く許容・ミドルリスク）")
+    同じ判定ロジックでマッチ度を計算できるようにするためのもの。
+    ※ウィジェット本体のキーはSTEP3を表示している間にパージされる可能性があるため、
+    パージの影響を受けない恒久保持用キー（__persist）を優先して参照する。"""
+    tolerance = _get_persisted("result_tolerance", "普通（標準的な市場の値動きをバランス良く許容・ミドルリスク）")
     return {
         "tolerance_level": (
             "低い" if ("低い" in tolerance or "非常に低い" in tolerance) else
             "高い" if ("高い" in tolerance) else "普通"
         ),
         "tolerance_raw": tolerance,
-        "purpose": st.session_state.get("result_purpose", ""),
-        "distribution_pref": st.session_state.get("result_distribution_pref", "特にこだわらない"),
-        "style_pref": st.session_state.get("result_style_pref", "特にこだわらない"),
-        "horizon": st.session_state.get("result_horizon", "特にこだわらない"),
-        "age_range": st.session_state.get("result_age_range", ""),
-        "experience": st.session_state.get("result_experience", ""),
-        "nisa_pref": st.session_state.get("result_nisa_pref", "特にこだわらない"),
-        "fx_tolerance": st.session_state.get("result_fx_tolerance", "特にこだわらない"),
-        "cost_pref": st.session_state.get("result_cost_pref", "特にこだわらない"),
-        "existing_assets": st.session_state.get("result_existing_assets", []),
-        "asset_scale": st.session_state.get("result_asset_scale", "回答しない"),
-        "investment_amount": st.session_state.get("result_investment_amount", "回答しない"),
-        "region_pref": st.session_state.get("result_region_pref", []),
-        "region_avoid": st.session_state.get("result_region_avoid", []),
-        "focus_assets": st.session_state.get("result_focus_assets", []),
-        "free_text": st.session_state.get("result_free_text", ""),
+        "purpose": _get_persisted("result_purpose", ""),
+        "distribution_pref": _get_persisted("result_distribution_pref", "特にこだわらない"),
+        "style_pref": _get_persisted("result_style_pref", "特にこだわらない"),
+        "horizon": _get_persisted("result_horizon", "特にこだわらない"),
+        "age_range": _get_persisted("result_age_range", ""),
+        "experience": _get_persisted("result_experience", ""),
+        "nisa_pref": _get_persisted("result_nisa_pref", "特にこだわらない"),
+        "fx_tolerance": _get_persisted("result_fx_tolerance", "特にこだわらない"),
+        "cost_pref": _get_persisted("result_cost_pref", "特にこだわらない"),
+        "existing_assets": _get_persisted("result_existing_assets", []),
+        "asset_scale": _get_persisted("result_asset_scale", "回答しない"),
+        "investment_amount": _get_persisted("result_investment_amount", "回答しない"),
+        "region_pref": _get_persisted("result_region_pref", []),
+        "region_avoid": _get_persisted("result_region_avoid", []),
+        "focus_assets": _get_persisted("result_focus_assets", []),
+        "free_text": _get_persisted("result_free_text", ""),
         "required_return": (
             solve_required_annual_return(
-                st.session_state.get("result_target_amount"),
-                st.session_state.get("result_lump_sum_amount", 0.0),
-                st.session_state.get("result_monthly_contribution", 0.0),
-                st.session_state.get("result_investment_years_precise"),
-            ) if st.session_state.get("result_use_goal_calc", False) else None
+                _get_persisted("result_target_amount", None),
+                _get_persisted("result_lump_sum_amount", 0.0),
+                _get_persisted("result_monthly_contribution", 0.0),
+                _get_persisted("result_investment_years_precise", None),
+            ) if _get_persisted("result_use_goal_calc", False) else None
         ),
     }
 
@@ -3955,7 +4016,7 @@ def render_selection_content(active_api_key):
         st.markdown("##### 👤 基本プロフィール")
         col_p1, col_p2 = st.columns(2)
         with col_p1:
-            age_range = st.selectbox(
+            age_range = persistent_selectbox(
                 "お客様の年齢層：",
                 options=[
                     "20代以下（超長期の複利効果を最大活用できる年齢層）",
@@ -3964,23 +4025,23 @@ def render_selection_content(active_api_key):
                     "60〜75歳（アクティブシニア期。セカンドライフと取り崩し開始に向けた準備期）",
                     "75歳以上（高齢期。資産寿命の最大化と安定的な受け取りを重視する期）"
                 ],
-                index=1,
+                default_index=1,
                 key="result_age_range"
             )
         with col_p2:
-            experience = st.selectbox(
+            experience = persistent_selectbox(
                 "お客様の投資経験：",
                 options=[
                     "初心者（専門用語はすべて日常の平易な言葉に翻訳して解説）",
                     "中級者（基本用語は理解、数値の根拠や一歩深いデータを希望）",
                     "経験豊富・上級者（詳細データに基づく高度な分散・金融工学分析を希望）"
                 ],
-                index=0,
+                default_index=0,
                 key="result_experience"
             )
 
         st.markdown("##### 🎯 今回のご購入についての考え方")
-        purpose = st.selectbox(
+        purpose = persistent_selectbox(
             "投資目的：",
             options=[
                 "長期的な資産形成（つみたて運用等による将来への着実な備え）",
@@ -3988,31 +4049,31 @@ def render_selection_content(active_api_key):
                 "老後資金の確保・資産寿命の延伸（引き出しに耐えうる安定運用）",
                 "インフレ・市場下落リスクに対するポートフォリオ資産防衛"
             ],
-            index=0,
+            default_index=0,
             key="result_purpose"
         )
         col_p3, col_p4 = st.columns(2)
         with col_p3:
-            distribution_pref = st.selectbox(
+            distribution_pref = persistent_selectbox(
                 "分配方針についてのお考え：",
                 options=[
                     "資産の成長を重視し、分配は極力少ない方がよい",
                     "利益の一部を受け取りながら投資を続けたい",
                     "特にこだわらない",
                 ],
-                index=2,
+                default_index=2,
                 key="result_distribution_pref"
             )
         with col_p4:
-            style_pref = st.selectbox(
+            style_pref = persistent_selectbox(
                 "運用スタイルの好み：",
                 options=["インデックス型を好む", "アクティブ型を好む", "特にこだわらない"],
-                index=2,
+                default_index=2,
                 key="result_style_pref"
             )
         col_p5, col_p6 = st.columns(2)
         with col_p5:
-            tolerance = st.selectbox(
+            tolerance = persistent_selectbox(
                 "リスク許容度：",
                 options=[
                     "非常に低い（元本毀損を極力避けたい・徹底したローリスク）",
@@ -4021,14 +4082,14 @@ def render_selection_content(active_api_key):
                     "高い（中長期的な収益重視で一時的な大きな下落も許容・ハイリスク）",
                     "非常に高い（短期的な元本損害を覚悟し限界までリターンを狙う・超ハイリスク）"
                 ],
-                index=2,
+                default_index=2,
                 key="result_tolerance"
             )
         with col_p6:
-            horizon = st.selectbox(
+            horizon = persistent_selectbox(
                 "想定運用期間：",
                 options=["3年未満（短期）", "3〜10年（中期）", "10年超（長期）", "特にこだわらない"],
-                index=3,
+                default_index=3,
                 key="result_horizon"
             )
 
@@ -4036,20 +4097,20 @@ def render_selection_content(active_api_key):
         with st.expander("📋 追加の制約条件（任意・よく使う項目）", expanded=True):
             col_c1, col_c2 = st.columns(2)
             with col_c1:
-                fx_tolerance = st.selectbox(
+                fx_tolerance = persistent_selectbox(
                     "為替リスクの許容度：",
                     options=["為替リスクは避けたい（国内資産中心）", "ある程度は許容できる", "特にこだわらない"],
-                    index=2,
+                    default_index=2,
                     key="result_fx_tolerance"
                 )
             with col_c2:
-                nisa_pref = st.selectbox(
+                nisa_pref = persistent_selectbox(
                     "NISA活用の意向：",
                     options=["つみたて投資枠を使いたい", "成長投資枠を使いたい", "特にこだわらない"],
-                    index=2,
+                    default_index=2,
                     key="result_nisa_pref"
                 )
-            cost_pref = st.selectbox(
+            cost_pref = persistent_selectbox(
                 "コストに関する考え方：",
                 options=[
                     "コストを最優先に抑えたい（低コスト重視）",
@@ -4057,35 +4118,34 @@ def render_selection_content(active_api_key):
                     "コストよりも運用内容・リターンを重視したい",
                     "特にこだわらない",
                 ],
-                index=3,
+                default_index=3,
                 key="result_cost_pref"
             )
 
         with st.expander("💰 資産状況（任意）", expanded=False):
-            existing_assets = st.multiselect(
+            existing_assets = persistent_multiselect(
                 "現在保有している金融資産（複数選択可）：",
                 options=[
                     "預貯金のみ", "投資信託", "国内株式", "外国株式", "債券",
                     "貯蓄性保険", "NISA口座（つみたて投資枠）利用中", "NISA口座（成長投資枠）利用中",
                     "iDeCo", "不動産（投資用）", "特になし・分からない"
                 ],
-                default=[],
                 placeholder="選択してください（複数選択可）",
                 key="result_existing_assets"
             )
             col_a1, col_a2 = st.columns(2)
             with col_a1:
-                asset_scale = st.selectbox(
+                asset_scale = persistent_selectbox(
                     "保有金融資産の規模目安：",
                     options=["500万円未満", "500万円〜2,000万円", "2,000万円〜5,000万円", "5,000万円以上", "回答しない"],
-                    index=4,
+                    default_index=4,
                     key="result_asset_scale"
                 )
             with col_a2:
-                investment_amount = st.selectbox(
+                investment_amount = persistent_selectbox(
                     "今回の投資予定額の目安：",
                     options=["50万円未満", "50万円〜200万円", "200万円〜500万円", "500万円〜1,000万円", "1,000万円以上", "回答しない"],
-                    index=5,
+                    default_index=5,
                     key="result_investment_amount"
                 )
             st.caption("💡 保有金融資産に対して今回の投資予定額の割合が大きい場合、資産が特定の商品に集中するリスクを踏まえ、リスク許容度をやや抑えた候補選定を行います。")
@@ -4093,31 +4153,28 @@ def render_selection_content(active_api_key):
         with st.expander("🌏 投資したい分野・地域（任意）", expanded=False):
             col_r1, col_r2 = st.columns(2)
             with col_r1:
-                region_pref = st.multiselect(
+                region_pref = persistent_multiselect(
                     "積極的に投資したい地域・国：",
                     options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
-                    default=[],
                     placeholder="選択してください（複数選択可）",
                     key="result_region_pref"
                 )
             with col_r2:
-                region_avoid = st.multiselect(
+                region_avoid = persistent_multiselect(
                     "避けたい地域・国：",
                     options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
-                    default=[],
                     placeholder="選択してください（複数選択可）",
                     key="result_region_avoid"
                 )
-            focus_assets = st.multiselect(
+            focus_assets = persistent_multiselect(
                 "注目する投資対象は？（該当するものがあれば選択）：",
                 options=["ハイイールド", "新興国", "小型成長株", "コモディティ（金）", "テクノロジー", "バイオ", "資源", "レバレッジ", "オルタナティブ"],
-                default=[],
                 placeholder="選択してください（複数選択可）",
                 key="result_focus_assets"
             )
 
         with st.expander("📝 自由記述（任意）", expanded=False):
-            free_text = st.text_area(
+            free_text = persistent_text_area(
                 "その他、お客様についての自由記述：",
                 placeholder="例：住宅ローン返済中で当面の余裕資金は少なめ／数年以内に教育資金の取り崩し予定あり／ESG投資に関心がある　など、上記の項目でカバーしきれない情報があれば自由にご記入ください。",
                 key="result_free_text",
@@ -4126,9 +4183,8 @@ def render_selection_content(active_api_key):
             st.caption("💡 この内容は、解説文だけでなく、絞り込みモードでの候補選定の優先度にも反映されます。\n※他の項目とは異なり、この自由記述欄のみ、内容の解釈にAI（生成AI）による文章理解を用います（AIが利用できない場合は簡易なキーワード判定に自動的に切り替わります）。")
 
         with st.expander("🧮 目標金額から必要な利回りを算出する（任意）", expanded=False):
-            use_goal_calc = st.checkbox(
+            use_goal_calc = persistent_checkbox(
                 "目標金額をもとに、必要な利回りを算出して絞り込みに反映する",
-                value=False,
                 key="result_use_goal_calc"
             )
             target_amount = None
@@ -4141,18 +4197,19 @@ def render_selection_content(active_api_key):
             if use_goal_calc:
                 col_g1, col_g2 = st.columns(2)
                 with col_g1:
-                    target_amount = st.number_input("目標金額（万円）：", min_value=0.0, value=1000.0, step=50.0, key="result_target_amount")
-                    investment_years_precise = st.number_input("具体的な運用年数（年）：", min_value=1, max_value=50, value=10, step=1, key="result_investment_years_precise")
+                    target_amount = persistent_number_input("目標金額（万円）：", key="result_target_amount", default_value=1000.0, min_value=0.0, step=50.0)
+                    investment_years_precise = persistent_number_input("具体的な運用年数（年）：", key="result_investment_years_precise", default_value=10, min_value=1, max_value=50, step=1)
                 with col_g2:
-                    investment_method = st.selectbox(
+                    investment_method = persistent_selectbox(
                         "運用方法：",
                         options=["一括投資", "積立投資", "一括＋積立の併用"],
+                        default_index=0,
                         key="result_investment_method"
                     )
                     if investment_method in ("一括投資", "一括＋積立の併用"):
-                        lump_sum_amount = st.number_input("一括投資額（万円）：", min_value=0.0, value=100.0, step=10.0, key="result_lump_sum_amount")
+                        lump_sum_amount = persistent_number_input("一括投資額（万円）：", key="result_lump_sum_amount", default_value=100.0, min_value=0.0, step=10.0)
                     if investment_method in ("積立投資", "一括＋積立の併用"):
-                        monthly_contribution = st.number_input("毎月の積立額（万円）：", min_value=0.0, value=3.0, step=0.5, key="result_monthly_contribution")
+                        monthly_contribution = persistent_number_input("毎月の積立額（万円）：", key="result_monthly_contribution", default_value=3.0, min_value=0.0, step=0.5)
 
                 required_return = solve_required_annual_return(target_amount, lump_sum_amount, monthly_contribution, investment_years_precise)
 
@@ -4328,6 +4385,15 @@ def render_selection_content(active_api_key):
             # この結果がどのヒアリング内容に基づくものかを記録しておく（後で入力内容とズレていないか判定するため）
             st.session_state.narrowing_hearing_snapshot = hearing.copy()
             st.session_state.selected_funds = [r["fund"] for r in narrowed]
+            # ※画面表示のたびに全ファンド分のチェックボックス状態を事前シードしているため、
+            #   ここで古いキーを削除しておかないと、絞り込み後もチェックボックスが「絞り込み前の
+            #   （未選択の）状態」のまま据え置かれてしまう。新しい選定結果に基づいて次の描画で
+            #   正しく再初期化されるよう、関連キーを明示的にクリアする。
+            for fname in fund_list:
+                for prefix in ("chk_", "chk_narrow_"):
+                    ckey = f"{prefix}{fname}"
+                    if ckey in st.session_state:
+                        del st.session_state[ckey]
             st.rerun()
 
         narrowing_results = st.session_state.get("narrowing_results", [])
@@ -4510,23 +4576,23 @@ def render_result_page():
     target_type = st.session_state.get("result_target_type", "顧客（お客様ご自身への直接説明）向け")
 
     if "顧客" in target_type:
-        age_val = st.session_state.get("result_age_range", "30代〜40代")
-        exp_val = st.session_state.get("result_experience", "初心者")
-        purp_val = st.session_state.get("result_purpose", "長期資産形成")
-        distribution_val = st.session_state.get("result_distribution_pref", "特にこだわらない")
-        style_val = st.session_state.get("result_style_pref", "特にこだわらない")
-        tol_val = st.session_state.get("result_tolerance", "普通")
-        horizon_val = st.session_state.get("result_horizon", "特にこだわらない")
-        fx_val = st.session_state.get("result_fx_tolerance", "特にこだわらない")
-        nisa_val = st.session_state.get("result_nisa_pref", "特にこだわらない")
-        cost_val = st.session_state.get("result_cost_pref", "特にこだわらない")
-        assets_val = st.session_state.get("result_existing_assets", [])
-        scale_val = st.session_state.get("result_asset_scale", "回答しない")
-        invest_amount_val = st.session_state.get("result_investment_amount", "回答しない")
-        region_pref_val = st.session_state.get("result_region_pref", [])
-        region_avoid_val = st.session_state.get("result_region_avoid", [])
-        focus_assets_val = st.session_state.get("result_focus_assets", [])
-        free_text_val = st.session_state.get("result_free_text", "").strip()
+        age_val = _get_persisted("result_age_range", "30代〜40代")
+        exp_val = _get_persisted("result_experience", "初心者")
+        purp_val = _get_persisted("result_purpose", "長期資産形成")
+        distribution_val = _get_persisted("result_distribution_pref", "特にこだわらない")
+        style_val = _get_persisted("result_style_pref", "特にこだわらない")
+        tol_val = _get_persisted("result_tolerance", "普通")
+        horizon_val = _get_persisted("result_horizon", "特にこだわらない")
+        fx_val = _get_persisted("result_fx_tolerance", "特にこだわらない")
+        nisa_val = _get_persisted("result_nisa_pref", "特にこだわらない")
+        cost_val = _get_persisted("result_cost_pref", "特にこだわらない")
+        assets_val = _get_persisted("result_existing_assets", [])
+        scale_val = _get_persisted("result_asset_scale", "回答しない")
+        invest_amount_val = _get_persisted("result_investment_amount", "回答しない")
+        region_pref_val = _get_persisted("result_region_pref", [])
+        region_avoid_val = _get_persisted("result_region_avoid", [])
+        focus_assets_val = _get_persisted("result_focus_assets", [])
+        free_text_val = _get_persisted("result_free_text", "").strip()
 
         summary_items = [
             f"年齢: {age_val}",
@@ -4556,12 +4622,12 @@ def render_result_page():
             summary_items.append(f"投資したい地域: {'、'.join(region_pref_val)}")
         if region_avoid_val:
             summary_items.append(f"避けたい地域: {'、'.join(region_avoid_val)}")
-        if st.session_state.get("result_use_goal_calc", False):
+        if _get_persisted("result_use_goal_calc", False):
             _req_ret = solve_required_annual_return(
-                st.session_state.get("result_target_amount"),
-                st.session_state.get("result_lump_sum_amount", 0.0),
-                st.session_state.get("result_monthly_contribution", 0.0),
-                st.session_state.get("result_investment_years_precise"),
+                _get_persisted("result_target_amount", None),
+                _get_persisted("result_lump_sum_amount", 0.0),
+                _get_persisted("result_monthly_contribution", 0.0),
+                _get_persisted("result_investment_years_precise", None),
             )
             if _req_ret is not None:
                 summary_items.append(f"目標必要利回り: 約{_req_ret}%（参考値）")
@@ -4942,22 +5008,22 @@ def render_result_page():
     if not st.session_state.generated_explanation:
         # ターゲットに合わせた動的プロンプトの合成
         target_persona_instruction = ""
-        selected_age = st.session_state.get("result_age_range", "30代〜40代")
-        selected_experience = st.session_state.get("result_experience", "初心者")
-        selected_purpose = st.session_state.get("result_purpose", "長期資産形成")
-        selected_distribution_pref = st.session_state.get("result_distribution_pref", "特にこだわらない")
-        selected_style_pref = st.session_state.get("result_style_pref", "特にこだわらない")
-        selected_tolerance = st.session_state.get("result_tolerance", "普通")
-        selected_horizon = st.session_state.get("result_horizon", "特にこだわらない")
-        selected_fx = st.session_state.get("result_fx_tolerance", "特にこだわらない")
-        selected_nisa_pref = st.session_state.get("result_nisa_pref", "特にこだわらない")
-        selected_cost_pref = st.session_state.get("result_cost_pref", "特にこだわらない")
-        selected_region_pref = st.session_state.get("result_region_pref", [])
-        selected_region_avoid = st.session_state.get("result_region_avoid", [])
-        selected_focus_assets = st.session_state.get("result_focus_assets", [])
-        selected_existing_assets = st.session_state.get("result_existing_assets", [])
-        selected_asset_scale = st.session_state.get("result_asset_scale", "回答しない")
-        selected_free_text = st.session_state.get("result_free_text", "").strip()
+        selected_age = _get_persisted("result_age_range", "30代〜40代")
+        selected_experience = _get_persisted("result_experience", "初心者")
+        selected_purpose = _get_persisted("result_purpose", "長期資産形成")
+        selected_distribution_pref = _get_persisted("result_distribution_pref", "特にこだわらない")
+        selected_style_pref = _get_persisted("result_style_pref", "特にこだわらない")
+        selected_tolerance = _get_persisted("result_tolerance", "普通")
+        selected_horizon = _get_persisted("result_horizon", "特にこだわらない")
+        selected_fx = _get_persisted("result_fx_tolerance", "特にこだわらない")
+        selected_nisa_pref = _get_persisted("result_nisa_pref", "特にこだわらない")
+        selected_cost_pref = _get_persisted("result_cost_pref", "特にこだわらない")
+        selected_region_pref = _get_persisted("result_region_pref", [])
+        selected_region_avoid = _get_persisted("result_region_avoid", [])
+        selected_focus_assets = _get_persisted("result_focus_assets", [])
+        selected_existing_assets = _get_persisted("result_existing_assets", [])
+        selected_asset_scale = _get_persisted("result_asset_scale", "回答しない")
+        selected_free_text = _get_persisted("result_free_text", "").strip()
         
         if "担当者" in target_type:
             target_persona_instruction = """
