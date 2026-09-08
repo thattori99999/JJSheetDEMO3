@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r50（ファンド選択チェックボックスの永続化を根本修正、ヒアリングUIをグループ化・折りたたみ式に全面刷新、基本的な投資スタンス設問を廃止し今回の意向に統一）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r51（ファンド選択の状態復元をさらに強化：モード切替時も全ファンド分のチェックボックス状態を事前復元）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -4200,6 +4200,12 @@ def render_selection_content(active_api_key):
     )
     st.session_state.comparison_mode_persistent = comparison_mode
     is_narrowing_mode = "絞り込んでもらう" in comparison_mode
+
+    # ページ遷移等でウィジェットの内部状態が失われた場合に備え、表示対象を問わず
+    # 全ファンド・両方のキー接頭辞について、先にselected_fundsから状態を復元しておく
+    # （モード切替や表示対象の変化による取りこぼしを防ぐための追加の防御策）。
+    ensure_fund_checkbox_state(fund_list, "chk_")
+    ensure_fund_checkbox_state(fund_list, "chk_narrow_")
 
     current_choices = []
 
