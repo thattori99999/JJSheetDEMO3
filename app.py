@@ -2036,7 +2036,7 @@ elif st.session_state.get("system_prompt_analysis_version") != PROMPT_ANALYSIS_V
 
 # --- 3. 実行時スコープエラー（NameError）を完全に根絶するための静的グローバル定義 ---
 ACTIVE_API_KEY = ""
-APP_BUILD_VERSION = "2026-07-22-r49（STEP3に表・レポート内容を質問できるスコープ制限つきチャット機能を追加。STEP2の比較方法選択がページ遷移で消える不具合を修正）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
+APP_BUILD_VERSION = "2026-07-22-r50（ファンド選択チェックボックスの永続化を根本修正、ヒアリングUIをグループ化・折りたたみ式に全面刷新、基本的な投資スタンス設問を廃止し今回の意向に統一）"  # デプロイ確認用のビルド識別子（ログイン画面に表示）
 
 # --- 4. 補助関数および自動置換フィルターの定義 ---
 
@@ -2749,6 +2749,20 @@ def interpret_free_text_via_ai(free_text, api_key):
     return analyze_free_text_sentiment(free_text)
 
 
+def ensure_fund_checkbox_state(fund_list, key_prefix):
+    """各ファンドのチェックボックスのセッション状態を、まだ存在しない場合にのみ
+    st.session_state.selected_funds（恒久的な選択状態）から初期化する。
+    ※STEP3等の他画面を閲覧した後にSTEP2へ戻ると、個々のチェックボックスのウィジェット状態が
+    失われ、選択していたはずのファンドが未選択に見えてしまう不具合があった。
+    このヘルパーをチェックボックス描画前に必ず呼び出すことで、キーが存在しない場合は
+    selected_funds の内容から正しく復元する。既に存在するキーには一切触れないため、
+    ユーザーが直前に行った操作（チェック／チェック解除）を上書きすることはない。"""
+    for fund_name in fund_list:
+        key = f"{key_prefix}{fund_name}"
+        if key not in st.session_state:
+            st.session_state[key] = fund_name in st.session_state.selected_funds
+
+
 def get_cached_free_text_items(free_text, api_key):
     """自由記述欄のAIによる解釈結果を、同じ自由記述の内容である限りセッション内で再利用する。
     ※AI（Gemini）の応答は、同一の入力・同一のプロンプトであっても呼び出しごとに多少ゆらぐことがある。
@@ -2987,8 +3001,6 @@ def reconstruct_hearing_from_session():
             "高い" if ("高い" in tolerance) else "普通"
         ),
         "tolerance_raw": tolerance,
-        "base_tolerance_raw": st.session_state.get("result_base_tolerance", "普通"),
-        "base_horizon": st.session_state.get("result_base_horizon", "特にこだわらない"),
         "purpose": st.session_state.get("result_purpose", ""),
         "distribution_pref": st.session_state.get("result_distribution_pref", "特にこだわらない"),
         "style_pref": st.session_state.get("result_style_pref", "特にこだわらない"),
@@ -3762,7 +3774,6 @@ def render_admin_content(active_api_key):
 #### ⑦ 想定運用期間 × 換金・解約条件
 - **見る項目**：「換金・解約の条件」欄の流動性制限（大口換金制限・低流動性資産・四半期ごとの解約制限等）の記載有無。
 - **判定**：想定運用期間が短期（3年未満）の場合、流動性制限がある商品は減点。
-- **★補足**：「基本的な投資スタンス」と「今回のご購入に関する意向」を別設問として分けてお伺いしており、絞り込みの判定には「今回のご購入に関する意向」（リスク許容度・運用期間）を使用します。「基本的な投資スタンス」は解説文の参考情報としてのみ利用します。
 
 #### ⑧ 投資経験 × 想定購入層・商品構造
 - **見る項目**：「商品組成に携わる事業者が想定する購入層」欄の、投資経験者を前提とする記載の有無。また、ファンド・オブ・ファンズ／オルタナティブ／プライベート・エクイティ／ブル・ベア型等、構造が複雑と考えられる商品の有無。
@@ -3941,54 +3952,36 @@ def render_selection_content(active_api_key):
     st.session_state["result_target_type"] = target_type
 
     with st.container(border=True):
-        st.markdown("##### 👤 お客様の属性プロフィール（基本項目）")
-        age_range = st.selectbox(
-            "お客様の年齢層：",
-            options=[
-                "20代以下（超長期の複利効果を最大活用できる年齢層）",
-                "30代〜40代（教育・住宅などライフイベント資金とのバランス期）",
-                "50代（リタイア期を見据えたポートフォリオの最適化期）",
-                "60〜75歳（アクティブシニア期。セカンドライフと取り崩し開始に向けた準備期）",
-                "75歳以上（高齢期。資産寿命の最大化と安定的な受け取りを重視する期）"
-            ],
-            index=1,
-            key="result_age_range"
-        )
-        experience = st.selectbox(
-            "お客様の投資経験：",
-            options=[
-                "初心者（専門用語はすべて日常の平易な言葉に翻訳して解説）",
-                "中級者（基本用語は理解、数値の根拠や一歩深いデータを希望）",
-                "経験豊富・上級者（詳細データに基づく高度な分散・金融工学分析を希望）"
-            ],
-            index=0,
-            key="result_experience"
-        )
+        st.markdown("##### 👤 基本プロフィール")
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            age_range = st.selectbox(
+                "お客様の年齢層：",
+                options=[
+                    "20代以下（超長期の複利効果を最大活用できる年齢層）",
+                    "30代〜40代（教育・住宅などライフイベント資金とのバランス期）",
+                    "50代（リタイア期を見据えたポートフォリオの最適化期）",
+                    "60〜75歳（アクティブシニア期。セカンドライフと取り崩し開始に向けた準備期）",
+                    "75歳以上（高齢期。資産寿命の最大化と安定的な受け取りを重視する期）"
+                ],
+                index=1,
+                key="result_age_range"
+            )
+        with col_p2:
+            experience = st.selectbox(
+                "お客様の投資経験：",
+                options=[
+                    "初心者（専門用語はすべて日常の平易な言葉に翻訳して解説）",
+                    "中級者（基本用語は理解、数値の根拠や一歩深いデータを希望）",
+                    "経験豊富・上級者（詳細データに基づく高度な分散・金融工学分析を希望）"
+                ],
+                index=0,
+                key="result_experience"
+            )
 
-        st.markdown("##### 🧭 基本的な投資スタンス（ふだんのお考え）")
-        st.caption("💡 ふだんの基本的な投資に対する考え方と、今回の購入についての意向が異なる場合があります（例：ふだんは長期・安定志向だが、今回だけ話題のテーマ型ファンドを試したい　等）。両方を分けてお伺いします。")
-        base_tolerance = st.selectbox(
-            "ふだんの基本的なリスク許容度：",
-            options=[
-                "非常に低い（元本毀損を極力避けたい・徹底したローリスク）",
-                "低い（多少の変動は許容・ややローリスク）",
-                "普通（標準的な市場の値動きをバランス良く許容・ミドルリスク）",
-                "高い（中長期的な収益重視で一時的な大きな下落も許容・ハイリスク）",
-                "非常に高い（短期的な元本損害を覚悟し限界までリターンを狙う・超ハイリスク）"
-            ],
-            index=2,
-            key="result_base_tolerance"
-        )
-        base_horizon = st.selectbox(
-            "ふだんの基本的な運用期間の考え方：",
-            options=["3年未満（短期）", "3〜10年（中期）", "10年超（長期）", "特にこだわらない"],
-            index=3,
-            key="result_base_horizon"
-        )
-
-        st.markdown("##### 🎯 今回のご購入に関する意向")
+        st.markdown("##### 🎯 今回のご購入についての考え方")
         purpose = st.selectbox(
-            "お客様の投資目的：",
+            "投資目的：",
             options=[
                 "長期的な資産形成（つみたて運用等による将来への着実な備え）",
                 "直近のライフイベント資金（住宅、教育等に向けた計画的な確保）",
@@ -3998,167 +3991,188 @@ def render_selection_content(active_api_key):
             index=0,
             key="result_purpose"
         )
-        distribution_pref = st.selectbox(
-            "ファンドの分配方針についてのお考え：",
-            options=[
-                "資産の成長を重視し、分配は極力少ない方がよい",
-                "利益の一部を受け取りながら投資を続けたい",
-                "特にこだわらない",
-            ],
-            index=2,
-            key="result_distribution_pref"
-        )
-        tolerance = st.selectbox(
-            "今回のご購入における具体的なリスク許容度：",
-            options=[
-                "非常に低い（元本毀損を極力避けたい・徹底したローリスク）",
-                "低い（多少の変動は許容・ややローリスク）",
-                "普通（標準的な市場の値動きをバランス良く許容・ミドルリスク）",
-                "高い（中長期的な収益重視で一時的な大きな下落も許容・ハイリスク）",
-                "非常に高い（短期的な元本損害を覚悟し限界までリターンを狙う・超ハイリスク）"
-            ],
-            index=2,
-            key="result_tolerance"
-        )
-
-        st.markdown("##### 📋 お客様の属性プロフィール（追加項目・任意）")
-        horizon = st.selectbox(
-            "今回のご購入における具体的な運用期間：",
-            options=["3年未満（短期）", "3〜10年（中期）", "10年超（長期）", "特にこだわらない"],
-            index=3,
-            key="result_horizon"
-        )
-        style_pref = st.selectbox(
-            "運用スタイルの好み：",
-            options=["インデックス型を好む", "アクティブ型を好む", "特にこだわらない"],
-            index=2,
-            key="result_style_pref"
-        )
-        fx_tolerance = st.selectbox(
-            "為替リスクの許容度：",
-            options=["為替リスクは避けたい（国内資産中心）", "ある程度は許容できる", "特にこだわらない"],
-            index=2,
-            key="result_fx_tolerance"
-        )
-        nisa_pref = st.selectbox(
-            "NISA活用の意向：",
-            options=["つみたて投資枠を使いたい", "成長投資枠を使いたい", "特にこだわらない"],
-            index=2,
-            key="result_nisa_pref"
-        )
-        existing_assets = st.multiselect(
-            "現在保有している金融資産（複数選択可）：",
-            options=[
-                "預貯金のみ", "投資信託", "国内株式", "外国株式", "債券",
-                "貯蓄性保険", "NISA口座（つみたて投資枠）利用中", "NISA口座（成長投資枠）利用中",
-                "iDeCo", "不動産（投資用）", "特になし・分からない"
-            ],
-            default=[],
-            placeholder="選択してください（複数選択可）",
-            key="result_existing_assets"
-        )
-        asset_scale = st.selectbox(
-            "保有金融資産の規模目安（任意・回答いただける範囲で結構です）：",
-            options=["500万円未満", "500万円〜2,000万円", "2,000万円〜5,000万円", "5,000万円以上", "回答しない"],
-            index=4,
-            key="result_asset_scale"
-        )
-        investment_amount = st.selectbox(
-            "今回の投資予定額の目安：",
-            options=["50万円未満", "50万円〜200万円", "200万円〜500万円", "500万円〜1,000万円", "1,000万円以上", "回答しない"],
-            index=5,
-            key="result_investment_amount"
-        )
-        st.caption("💡 保有金融資産に対して今回の投資予定額の割合が大きい場合、資産が特定の商品に集中するリスクを踏まえ、リスク許容度をやや抑えた候補選定を行います。")
-        cost_pref = st.selectbox(
-            "コストに関する考え方：",
-            options=[
-                "コストを最優先に抑えたい（低コスト重視）",
-                "コストと運用内容のバランスを重視したい",
-                "コストよりも運用内容・リターンを重視したい",
-                "特にこだわらない",
-            ],
-            index=3,
-            key="result_cost_pref"
-        )
-        region_pref = st.multiselect(
-            "積極的に投資したい地域・国（複数選択可）：",
-            options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
-            default=[],
-            placeholder="選択してください（複数選択可）",
-            key="result_region_pref"
-        )
-        region_avoid = st.multiselect(
-            "避けたい地域・国（複数選択可）：",
-            options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
-            default=[],
-            placeholder="選択してください（複数選択可）",
-            key="result_region_avoid"
-        )
-        focus_assets = st.multiselect(
-            "注目する投資対象は？（該当するものがあれば選択）：",
-            options=["ハイイールド", "新興国", "小型成長株", "コモディティ（金）", "テクノロジー", "バイオ", "資源", "レバレッジ", "オルタナティブ"],
-            default=[],
-            placeholder="選択してください（複数選択可）",
-            key="result_focus_assets"
-        )
+        col_p3, col_p4 = st.columns(2)
+        with col_p3:
+            distribution_pref = st.selectbox(
+                "分配方針についてのお考え：",
+                options=[
+                    "資産の成長を重視し、分配は極力少ない方がよい",
+                    "利益の一部を受け取りながら投資を続けたい",
+                    "特にこだわらない",
+                ],
+                index=2,
+                key="result_distribution_pref"
+            )
+        with col_p4:
+            style_pref = st.selectbox(
+                "運用スタイルの好み：",
+                options=["インデックス型を好む", "アクティブ型を好む", "特にこだわらない"],
+                index=2,
+                key="result_style_pref"
+            )
+        col_p5, col_p6 = st.columns(2)
+        with col_p5:
+            tolerance = st.selectbox(
+                "リスク許容度：",
+                options=[
+                    "非常に低い（元本毀損を極力避けたい・徹底したローリスク）",
+                    "低い（多少の変動は許容・ややローリスク）",
+                    "普通（標準的な市場の値動きをバランス良く許容・ミドルリスク）",
+                    "高い（中長期的な収益重視で一時的な大きな下落も許容・ハイリスク）",
+                    "非常に高い（短期的な元本損害を覚悟し限界までリターンを狙う・超ハイリスク）"
+                ],
+                index=2,
+                key="result_tolerance"
+            )
+        with col_p6:
+            horizon = st.selectbox(
+                "想定運用期間：",
+                options=["3年未満（短期）", "3〜10年（中期）", "10年超（長期）", "特にこだわらない"],
+                index=3,
+                key="result_horizon"
+            )
 
         st.markdown("---")
-        st.markdown("##### 🎯 目標金額から必要な利回りを算出する（任意）")
-        use_goal_calc = st.checkbox(
-            "目標金額をもとに、必要な利回りを算出して絞り込みに反映する",
-            value=False,
-            key="result_use_goal_calc"
-        )
-        target_amount = None
-        investment_method = "一括投資"
-        lump_sum_amount = 0.0
-        monthly_contribution = 0.0
-        investment_years_precise = None
-        required_return = None
-
-        if use_goal_calc:
-            col_g1, col_g2 = st.columns(2)
-            with col_g1:
-                target_amount = st.number_input("目標金額（万円）：", min_value=0.0, value=1000.0, step=50.0, key="result_target_amount")
-                investment_years_precise = st.number_input("具体的な運用年数（年）：", min_value=1, max_value=50, value=10, step=1, key="result_investment_years_precise")
-            with col_g2:
-                investment_method = st.selectbox(
-                    "運用方法：",
-                    options=["一括投資", "積立投資", "一括＋積立の併用"],
-                    key="result_investment_method"
+        with st.expander("📋 追加の制約条件（任意・よく使う項目）", expanded=True):
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                fx_tolerance = st.selectbox(
+                    "為替リスクの許容度：",
+                    options=["為替リスクは避けたい（国内資産中心）", "ある程度は許容できる", "特にこだわらない"],
+                    index=2,
+                    key="result_fx_tolerance"
                 )
-                if investment_method in ("一括投資", "一括＋積立の併用"):
-                    lump_sum_amount = st.number_input("一括投資額（万円）：", min_value=0.0, value=100.0, step=10.0, key="result_lump_sum_amount")
-                if investment_method in ("積立投資", "一括＋積立の併用"):
-                    monthly_contribution = st.number_input("毎月の積立額（万円）：", min_value=0.0, value=3.0, step=0.5, key="result_monthly_contribution")
+            with col_c2:
+                nisa_pref = st.selectbox(
+                    "NISA活用の意向：",
+                    options=["つみたて投資枠を使いたい", "成長投資枠を使いたい", "特にこだわらない"],
+                    index=2,
+                    key="result_nisa_pref"
+                )
+            cost_pref = st.selectbox(
+                "コストに関する考え方：",
+                options=[
+                    "コストを最優先に抑えたい（低コスト重視）",
+                    "コストと運用内容のバランスを重視したい",
+                    "コストよりも運用内容・リターンを重視したい",
+                    "特にこだわらない",
+                ],
+                index=3,
+                key="result_cost_pref"
+            )
 
-            required_return = solve_required_annual_return(target_amount, lump_sum_amount, monthly_contribution, investment_years_precise)
+        with st.expander("💰 資産状況（任意）", expanded=False):
+            existing_assets = st.multiselect(
+                "現在保有している金融資産（複数選択可）：",
+                options=[
+                    "預貯金のみ", "投資信託", "国内株式", "外国株式", "債券",
+                    "貯蓄性保険", "NISA口座（つみたて投資枠）利用中", "NISA口座（成長投資枠）利用中",
+                    "iDeCo", "不動産（投資用）", "特になし・分からない"
+                ],
+                default=[],
+                placeholder="選択してください（複数選択可）",
+                key="result_existing_assets"
+            )
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                asset_scale = st.selectbox(
+                    "保有金融資産の規模目安：",
+                    options=["500万円未満", "500万円〜2,000万円", "2,000万円〜5,000万円", "5,000万円以上", "回答しない"],
+                    index=4,
+                    key="result_asset_scale"
+                )
+            with col_a2:
+                investment_amount = st.selectbox(
+                    "今回の投資予定額の目安：",
+                    options=["50万円未満", "50万円〜200万円", "200万円〜500万円", "500万円〜1,000万円", "1,000万円以上", "回答しない"],
+                    index=5,
+                    key="result_investment_amount"
+                )
+            st.caption("💡 保有金融資産に対して今回の投資予定額の割合が大きい場合、資産が特定の商品に集中するリスクを踏まえ、リスク許容度をやや抑えた候補選定を行います。")
 
-            if required_return is None:
-                st.error("⚠️ ご入力の条件（投資額・積立額・年数）では、現実的な利回り水準で目標金額に到達することが難しい可能性があります。目標金額を見直すか、積立額・運用年数を増やすことをご検討ください。")
-            else:
-                st.info(f"📊 目標達成に必要な年率利回り（税金・手数料を考慮しない単純計算）：約 **{required_return}%**\n\n※これはあくまで将来価値の単純計算に基づく参考値であり、実際には税金・手数料等がかかります。また、この後の絞り込みで比較に用いる各ファンドの実績値も過去の運用実績にすぎず、将来の運用成果を保証するものでは一切ありません。")
-                mismatch_cap = None
-                if "非常に低い" in tolerance:
-                    mismatch_cap = 2.0
-                elif "非常に高い" in tolerance:
-                    mismatch_cap = 15.0
-                elif "低い" in tolerance:
-                    mismatch_cap = 4.0
-                elif "高い" in tolerance:
-                    mismatch_cap = 10.0
+        with st.expander("🌏 投資したい分野・地域（任意）", expanded=False):
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                region_pref = st.multiselect(
+                    "積極的に投資したい地域・国：",
+                    options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
+                    default=[],
+                    placeholder="選択してください（複数選択可）",
+                    key="result_region_pref"
+                )
+            with col_r2:
+                region_avoid = st.multiselect(
+                    "避けたい地域・国：",
+                    options=["米国", "全世界", "先進国（日本除く）", "欧州", "インド", "中国", "新興国全般", "日本"],
+                    default=[],
+                    placeholder="選択してください（複数選択可）",
+                    key="result_region_avoid"
+                )
+            focus_assets = st.multiselect(
+                "注目する投資対象は？（該当するものがあれば選択）：",
+                options=["ハイイールド", "新興国", "小型成長株", "コモディティ（金）", "テクノロジー", "バイオ", "資源", "レバレッジ", "オルタナティブ"],
+                default=[],
+                placeholder="選択してください（複数選択可）",
+                key="result_focus_assets"
+            )
+
+        with st.expander("📝 自由記述（任意）", expanded=False):
+            free_text = st.text_area(
+                "その他、お客様についての自由記述：",
+                placeholder="例：住宅ローン返済中で当面の余裕資金は少なめ／数年以内に教育資金の取り崩し予定あり／ESG投資に関心がある　など、上記の項目でカバーしきれない情報があれば自由にご記入ください。",
+                key="result_free_text",
+                height=110
+            )
+            st.caption("💡 この内容は、解説文だけでなく、絞り込みモードでの候補選定の優先度にも反映されます。\n※他の項目とは異なり、この自由記述欄のみ、内容の解釈にAI（生成AI）による文章理解を用います（AIが利用できない場合は簡易なキーワード判定に自動的に切り替わります）。")
+
+        with st.expander("🧮 目標金額から必要な利回りを算出する（任意）", expanded=False):
+            use_goal_calc = st.checkbox(
+                "目標金額をもとに、必要な利回りを算出して絞り込みに反映する",
+                value=False,
+                key="result_use_goal_calc"
+            )
+            target_amount = None
+            investment_method = "一括投資"
+            lump_sum_amount = 0.0
+            monthly_contribution = 0.0
+            investment_years_precise = None
+            required_return = None
+
+            if use_goal_calc:
+                col_g1, col_g2 = st.columns(2)
+                with col_g1:
+                    target_amount = st.number_input("目標金額（万円）：", min_value=0.0, value=1000.0, step=50.0, key="result_target_amount")
+                    investment_years_precise = st.number_input("具体的な運用年数（年）：", min_value=1, max_value=50, value=10, step=1, key="result_investment_years_precise")
+                with col_g2:
+                    investment_method = st.selectbox(
+                        "運用方法：",
+                        options=["一括投資", "積立投資", "一括＋積立の併用"],
+                        key="result_investment_method"
+                    )
+                    if investment_method in ("一括投資", "一括＋積立の併用"):
+                        lump_sum_amount = st.number_input("一括投資額（万円）：", min_value=0.0, value=100.0, step=10.0, key="result_lump_sum_amount")
+                    if investment_method in ("積立投資", "一括＋積立の併用"):
+                        monthly_contribution = st.number_input("毎月の積立額（万円）：", min_value=0.0, value=3.0, step=0.5, key="result_monthly_contribution")
+
+                required_return = solve_required_annual_return(target_amount, lump_sum_amount, monthly_contribution, investment_years_precise)
+
+                if required_return is None:
+                    st.error("⚠️ ご入力の条件（投資額・積立額・年数）では、現実的な利回り水準で目標金額に到達することが難しい可能性があります。目標金額を見直すか、積立額・運用年数を増やすことをご検討ください。")
                 else:
-                    mismatch_cap = 6.0
-                if required_return > mismatch_cap:
-                    st.warning(f"⚠️ 算出された必要利回り（約{required_return}%）は、お客様が申告されたリスク許容度「{tolerance}」の範囲では、一般的に狙いにくい水準です。目標金額・運用期間の見直し、積立額の増額、またはリスク許容度について改めてお客様とご確認いただくことをおすすめします。")
-        free_text = st.text_area(
-            "⭐ その他、お客様についての自由記述（任意・できるだけご記入をお願いします）：",
-            placeholder="例：住宅ローン返済中で当面の余裕資金は少なめ／数年以内に教育資金の取り崩し予定あり／ESG投資に関心がある　など、上記の項目でカバーしきれない情報があれば自由にご記入ください。",
-            key="result_free_text",
-            height=110
-        )
-        st.caption("💡 この自由記述欄の内容は、解説文の内容だけでなく、絞り込みモードでの候補選定の優先度にも反映されます。定型項目だけでは伝わらないニュアンスがあれば、ぜひご記入ください。\n※他の項目とは異なり、この自由記述欄のみ、内容の解釈にAI（生成AI）による文章理解を用います（AIが利用できない場合は簡易なキーワード判定に自動的に切り替わります）。")
+                    st.info(f"📊 目標達成に必要な年率利回り（税金・手数料を考慮しない単純計算）：約 **{required_return}%**\n\n※これはあくまで将来価値の単純計算に基づく参考値であり、実際には税金・手数料等がかかります。また、この後の絞り込みで比較に用いる各ファンドの実績値も過去の運用実績にすぎず、将来の運用成果を保証するものでは一切ありません。")
+                    mismatch_cap = None
+                    if "非常に低い" in tolerance:
+                        mismatch_cap = 2.0
+                    elif "非常に高い" in tolerance:
+                        mismatch_cap = 15.0
+                    elif "低い" in tolerance:
+                        mismatch_cap = 4.0
+                    elif "高い" in tolerance:
+                        mismatch_cap = 10.0
+                    else:
+                        mismatch_cap = 6.0
+                    if required_return > mismatch_cap:
+                        st.warning(f"⚠️ 算出された必要利回り（約{required_return}%）は、お客様が申告されたリスク許容度「{tolerance}」の範囲では、一般的に狙いにくい水準です。目標金額・運用期間の見直し、積立額の増額、またはリスク許容度について改めてお客様とご確認いただくことをおすすめします。")
 
     st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
 
@@ -4210,6 +4224,7 @@ def render_selection_content(active_api_key):
             fund_categories[fund_name] = classify_fund_type(fund_text, fund_name=fund_name)
 
         sorted_fund_list = sorted(fund_list, key=lambda name: (fund_categories[name], name))
+        ensure_fund_checkbox_state(sorted_fund_list, "chk_")
 
         prev_category = None
         for idx, fund_name in enumerate(sorted_fund_list):
@@ -4229,8 +4244,7 @@ def render_selection_content(active_api_key):
             col_sel, col_cat, col_com, col_fn = st.columns([1.2, 2.8, 2.8, 4.2])
 
             with col_sel:
-                default_value = fund_name in st.session_state.selected_funds
-                is_checked = st.checkbox("", value=default_value, key=f"chk_{fund_name}", label_visibility="collapsed")
+                is_checked = st.checkbox("", key=f"chk_{fund_name}", label_visibility="collapsed")
                 if is_checked:
                     current_choices.append(fund_name)
             with col_cat:
@@ -4259,8 +4273,6 @@ def render_selection_content(active_api_key):
                 "高い" if ("高い" in tolerance) else "普通"
             ),
             "tolerance_raw": tolerance,
-            "base_tolerance_raw": base_tolerance,
-            "base_horizon": base_horizon,
             "purpose": purpose,
             "distribution_pref": distribution_pref,
             "style_pref": style_pref,
@@ -4327,6 +4339,7 @@ def render_selection_content(active_api_key):
             }
             st.markdown("##### ✅ 絞り込み結果（チェックを調整して最終確定できます）")
             st.caption("※スコアが同点の場合は、信託報酬（コスト）がより低いファンドを優先して表示しています。以下の根拠は、影響の大きかった項目のみを表示しています。")
+            ensure_fund_checkbox_state([r["fund"] for r in narrowing_results], "chk_narrow_")
             for idx, r in enumerate(narrowing_results):
                 fund_name = r["fund"]
                 fund_data = st.session_state.uploaded_funds.get(fund_name, {})
@@ -4334,8 +4347,7 @@ def render_selection_content(active_api_key):
 
                 col_sel, col_info = st.columns([1, 9])
                 with col_sel:
-                    default_value = fund_name in st.session_state.selected_funds
-                    is_checked = st.checkbox("", value=default_value, key=f"chk_narrow_{fund_name}", label_visibility="collapsed")
+                    is_checked = st.checkbox("", key=f"chk_narrow_{fund_name}", label_visibility="collapsed")
                     if is_checked:
                         current_choices.append(fund_name)
                 with col_info:
@@ -4494,8 +4506,6 @@ def render_result_page():
     if "顧客" in target_type:
         age_val = st.session_state.get("result_age_range", "30代〜40代")
         exp_val = st.session_state.get("result_experience", "初心者")
-        base_tol_val = st.session_state.get("result_base_tolerance", "普通")
-        base_horizon_val = st.session_state.get("result_base_horizon", "特にこだわらない")
         purp_val = st.session_state.get("result_purpose", "長期資産形成")
         distribution_val = st.session_state.get("result_distribution_pref", "特にこだわらない")
         style_val = st.session_state.get("result_style_pref", "特にこだわらない")
@@ -4516,14 +4526,10 @@ def render_result_page():
             f"年齢: {age_val}",
             f"投資経験: {exp_val}",
             f"目的: {purp_val}",
-            f"リスク許容度（今回）: {tol_val}",
+            f"リスク許容度: {tol_val}",
         ]
-        if base_tol_val != tol_val:
-            summary_items.append(f"リスク許容度（基本スタンス）: {base_tol_val}")
-        if base_horizon_val != "特にこだわらない":
-            summary_items.append(f"運用期間（基本スタンス）: {base_horizon_val}")
         if horizon_val != "特にこだわらない":
-            summary_items.append(f"運用期間（今回）: {horizon_val}")
+            summary_items.append(f"運用期間: {horizon_val}")
         if distribution_val != "特にこだわらない":
             summary_items.append(f"分配方針: {distribution_val}")
         if style_val != "特にこだわらない":
@@ -4932,8 +4938,6 @@ def render_result_page():
         target_persona_instruction = ""
         selected_age = st.session_state.get("result_age_range", "30代〜40代")
         selected_experience = st.session_state.get("result_experience", "初心者")
-        selected_base_tolerance = st.session_state.get("result_base_tolerance", "普通")
-        selected_base_horizon = st.session_state.get("result_base_horizon", "特にこだわらない")
         selected_purpose = st.session_state.get("result_purpose", "長期資産形成")
         selected_distribution_pref = st.session_state.get("result_distribution_pref", "特にこだわらない")
         selected_style_pref = st.session_state.get("result_style_pref", "特にこだわらない")
@@ -4968,10 +4972,6 @@ def render_result_page():
                 exp_detail = "投資経験が極めて豊富で上級者レベルです。ポートフォリオ全体への相関効果、アセットクラス特有 of ベータ値やシャープレシオなどの金融工学的なデータも交え、緻密で高度なロジカル分散投資分析を提供してください。"
 
             extra_profile_lines = []
-            if selected_base_tolerance and selected_base_tolerance != selected_tolerance:
-                extra_profile_lines.append(f"・ふだんの基本的なリスク許容度：{selected_base_tolerance}（今回のご購入については別途下記の通り）")
-            if selected_base_horizon != "特にこだわらない":
-                extra_profile_lines.append(f"・ふだんの基本的な運用期間の考え方：{selected_base_horizon}")
             if selected_horizon != "特にこだわらない":
                 extra_profile_lines.append(f"・今回のご購入における想定運用期間：{selected_horizon}")
             if selected_distribution_pref != "特にこだわらない":
